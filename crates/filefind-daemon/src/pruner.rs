@@ -8,15 +8,28 @@
 //! Pruning is parallelized by volume/drive to maximize throughput.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use filefind_common::types::IndexedVolume;
 use filefind_common::{Database, extract_drive_letter_from_str};
 use rayon::prelude::*;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 /// Batch size for delete operations to avoid SQL statement size limits.
 const DELETE_BATCH_SIZE: usize = 500;
+
+/// Outcome of probing whether an indexed filesystem entry still exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathPresence {
+    /// The entry exists on disk.
+    Present,
+    /// The filesystem confirmed the entry is absent (`NotFound`).
+    Missing,
+    /// Existence could not be confirmed due to permission errors, timeouts, or I/O failures.
+    Unknown,
+}
 
 /// Statistics from a prune operation.
 #[derive(Debug, Default, Clone)]
@@ -35,6 +48,8 @@ pub struct PruneStats {
 struct EntryToCheck {
     /// Database row ID.
     id: i64,
+    /// Owning volume ID.
+    volume_id: i64,
     /// Full path of the entry.
     full_path: String,
     /// Whether this is a directory.
@@ -70,8 +85,17 @@ struct VolumeCheckResult {
 /// # Errors
 /// Returns an error if database operations fail.
 pub fn prune_missing_entries(database: &Database, verbose: bool) -> Result<PruneStats> {
-    // Get all entries from the database
-    let all_entries = get_all_entries(database)?;
+    prune_missing_entries_with_probe(database, verbose, &probe_path_presence)
+}
+
+/// Prune missing entries using a custom presence probe (used by tests to inject errors).
+fn prune_missing_entries_with_probe(
+    database: &Database,
+    verbose: bool,
+    probe: &(impl Fn(&Path) -> PathPresence + Sync),
+) -> Result<PruneStats> {
+    // Get all entries from the database and drop any belonging to offline or unreachable volume roots.
+    let all_entries = filter_online_volume_entries(database, get_all_entries(database)?, probe)?;
 
     if all_entries.is_empty() {
         info!("Prune complete: no entries to check");
@@ -95,7 +119,7 @@ pub fn prune_missing_entries(database: &Database, verbose: bool) -> Result<Prune
         .into_par_iter()
         .map(|(volume_key, entries)| {
             trace!("Processing volume: {}", volume_key);
-            check_volume_entries(entries)
+            check_volume_entries_with_probe(entries, probe)
         })
         .collect();
 
@@ -138,7 +162,11 @@ pub fn prune_missing_entries(database: &Database, verbose: bool) -> Result<Prune
 /// Returns an error if database operations fail.
 #[allow(dead_code, reason = "public API for single-volume pruning, used in tests")]
 pub fn prune_volume_entries(database: &Database, volume_id: i64, verbose: bool) -> Result<PruneStats> {
-    let entries = get_entries_for_volume(database, volume_id, None)?;
+    let entries = filter_online_volume_entries(
+        database,
+        get_entries_for_volume(database, volume_id, None)?,
+        &probe_path_presence,
+    )?;
 
     if entries.is_empty() {
         if verbose {
@@ -151,7 +179,7 @@ pub fn prune_volume_entries(database: &Database, volume_id: i64, verbose: bool) 
         info!("Checking {} entries for volume {}...", entries.len(), volume_id);
     }
 
-    let result = check_volume_entries(entries);
+    let result = check_volume_entries_with_probe(entries, &probe_path_presence);
 
     let stats = PruneStats {
         directories_removed: result.directories_removed,
@@ -211,6 +239,8 @@ pub fn prune_multiple_volumes(
         all_entries.extend(entries);
     }
 
+    let all_entries = filter_online_volume_entries(database, all_entries, &probe_path_presence)?;
+
     if all_entries.is_empty() {
         if verbose {
             info!("No entries to prune across {} volume(s)", volume_ids.len());
@@ -233,7 +263,7 @@ pub fn prune_multiple_volumes(
         .into_par_iter()
         .map(|(volume_key, entries)| {
             trace!("Processing volume: {}", volume_key);
-            check_volume_entries(entries)
+            check_volume_entries_with_probe(entries, &probe_path_presence)
         })
         .collect();
 
@@ -262,10 +292,92 @@ pub fn prune_multiple_volumes(
     Ok(stats)
 }
 
+/// Probe a path with `symlink_metadata`, distinguishing confirmed absence from access or I/O errors.
+fn probe_path_presence(path: &Path) -> PathPresence {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => PathPresence::Present,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => PathPresence::Missing,
+        Err(_) => PathPresence::Unknown,
+    }
+}
+
+/// Drop entries whose owning volume is marked offline or whose accessible mount point is currently missing.
+fn filter_online_volume_entries(
+    database: &Database,
+    entries: Vec<EntryToCheck>,
+    probe: &(impl Fn(&Path) -> PathPresence + Sync),
+) -> Result<Vec<EntryToCheck>> {
+    if entries.is_empty() {
+        return Ok(entries);
+    }
+
+    let volumes: HashMap<i64, IndexedVolume> = database
+        .get_all_volumes()?
+        .into_iter()
+        .filter_map(|volume| volume.id.map(|id| (id, volume)))
+        .collect();
+
+    let mut volumes_with_root_entries: HashSet<i64> = HashSet::new();
+    for entry in &entries {
+        if let Some(volume) = volumes.get(&entry.volume_id)
+            && path_is_within_mount(&entry.full_path, &volume.mount_point)
+        {
+            volumes_with_root_entries.insert(entry.volume_id);
+        }
+    }
+
+    let mut offline_volumes: HashSet<i64> = HashSet::new();
+    for (volume_id, volume) in &volumes {
+        if !volume.is_online {
+            warn!("Skipping prune for offline volume {}", volume.mount_point);
+            offline_volumes.insert(*volume_id);
+            continue;
+        }
+        if volumes_with_root_entries.contains(volume_id)
+            && probe(Path::new(&volume.mount_point)) != PathPresence::Present
+        {
+            warn!("Skipping prune for unreachable volume root {}", volume.mount_point);
+            offline_volumes.insert(*volume_id);
+        }
+    }
+
+    Ok(entries
+        .into_iter()
+        .filter(|entry| !offline_volumes.contains(&entry.volume_id))
+        .collect())
+}
+
+/// Return whether `path` is `mount_point` or a descendant of it.
+fn path_is_within_mount(path: &str, mount_point: &str) -> bool {
+    if mount_point.is_empty() {
+        return false;
+    }
+    if cfg!(windows) || mount_point.starts_with(r"\\") || extract_drive_letter_from_str(mount_point).is_some() {
+        let normalized_path = path.replace('/', "\\").to_lowercase();
+        let normalized_mount = mount_point.replace('/', "\\").to_lowercase();
+        let trimmed = normalized_mount.trim_end_matches('\\');
+        return normalized_path == trimmed
+            || normalized_path
+                .strip_prefix(trimmed)
+                .is_some_and(|rest| rest.starts_with('\\'));
+    }
+
+    let trimmed = mount_point.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return path.starts_with('/');
+    }
+    path == trimmed || path.strip_prefix(trimmed).is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Check entries for a single volume and return IDs to delete.
 ///
-/// This function processes directories first (sorted by path length) to enable parent-directory optimization for files.
-fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
+/// Processes directories first (sorted by path length) to enable parent-directory caching.
+/// Only confirmed `Missing` entries are scheduled for deletion.
+/// `Unknown` outcomes are preserved.
+fn check_volume_entries_with_probe(
+    entries: Vec<EntryToCheck>,
+    probe: &(impl Fn(&Path) -> PathPresence + Sync),
+) -> VolumeCheckResult {
     let mut result = VolumeCheckResult {
         ids_to_delete: Vec::new(),
         directories_removed: 0,
@@ -280,15 +392,15 @@ fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
     // Sort directories by path length (shortest first) for parent-first checking
     directories.sort_by_key(|entry| entry.full_path.len());
 
-    // Track missing and existing directories for optimization
+    // Track confirmed missing, present, and unknown directories for parent-chain caching.
     let mut missing_directories: HashSet<String> = HashSet::new();
     let mut existing_directories: HashSet<String> = HashSet::new();
+    let mut unknown_directories: HashSet<String> = HashSet::new();
 
     // Check directories first
     for entry in directories {
         result.entries_checked += 1;
 
-        // Check if any parent directory is known to be missing
         if is_parent_missing(&entry.full_path, &missing_directories) {
             trace!("Skipping {} - parent directory is missing", entry.full_path);
             result.checks_skipped += 1;
@@ -298,15 +410,27 @@ fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
             continue;
         }
 
-        // Check if the directory exists on disk
-        let path = Path::new(&entry.full_path);
-        if path.exists() {
-            existing_directories.insert(entry.full_path);
-        } else {
-            debug!("Directory no longer exists: {}", entry.full_path);
-            result.ids_to_delete.push(entry.id);
-            result.directories_removed += 1;
-            missing_directories.insert(entry.full_path);
+        if is_parent_missing(&entry.full_path, &unknown_directories) {
+            trace!("Preserving {} - parent directory status is unknown", entry.full_path);
+            result.checks_skipped += 1;
+            unknown_directories.insert(entry.full_path);
+            continue;
+        }
+
+        match probe(Path::new(&entry.full_path)) {
+            PathPresence::Present => {
+                existing_directories.insert(entry.full_path);
+            }
+            PathPresence::Missing => {
+                debug!("Directory no longer exists: {}", entry.full_path);
+                result.ids_to_delete.push(entry.id);
+                result.directories_removed += 1;
+                missing_directories.insert(entry.full_path);
+            }
+            PathPresence::Unknown => {
+                debug!("Preserving inaccessible directory: {}", entry.full_path);
+                unknown_directories.insert(entry.full_path);
+            }
         }
     }
 
@@ -314,7 +438,6 @@ fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
     for entry in files {
         result.entries_checked += 1;
 
-        // Check if the parent directory is known to be missing
         if is_parent_missing(&entry.full_path, &missing_directories) {
             trace!("Skipping {} - parent directory is missing", entry.full_path);
             result.checks_skipped += 1;
@@ -323,38 +446,43 @@ fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
             continue;
         }
 
-        // Check if the parent directory is known to exist (optimization)
+        if is_parent_missing(&entry.full_path, &unknown_directories) {
+            trace!("Preserving {} - parent directory status is unknown", entry.full_path);
+            result.checks_skipped += 1;
+            continue;
+        }
+
         let parent = Path::new(&entry.full_path)
             .parent()
             .map(|path| path.to_string_lossy().to_string());
 
-        let parent_exists = match &parent {
-            Some(parent_path) if existing_directories.contains(parent_path) => true,
-            Some(parent_path) if missing_directories.contains(parent_path) => false,
-            Some(parent_path) => {
-                // Check if parent exists and cache the result
-                let exists = Path::new(parent_path).exists();
-                if exists {
-                    existing_directories.insert(parent_path.clone());
-                } else {
-                    missing_directories.insert(parent_path.clone());
-                }
-                exists
-            }
-            None => true, // Root paths - check the file directly
-        };
+        let parent_presence = parent.as_deref().map_or(PathPresence::Present, |parent_path| {
+            probe_cached_parent(
+                parent_path,
+                &mut existing_directories,
+                &mut missing_directories,
+                &mut unknown_directories,
+                probe,
+            )
+        });
 
-        if !parent_exists {
-            trace!("Skipping {} - parent directory doesn't exist", entry.full_path);
-            result.checks_skipped += 1;
-            result.ids_to_delete.push(entry.id);
-            result.files_removed += 1;
-            continue;
+        match parent_presence {
+            PathPresence::Missing => {
+                trace!("Skipping {} - parent directory doesn't exist", entry.full_path);
+                result.checks_skipped += 1;
+                result.ids_to_delete.push(entry.id);
+                result.files_removed += 1;
+                continue;
+            }
+            PathPresence::Unknown => {
+                trace!("Preserving {} - parent directory status is unknown", entry.full_path);
+                result.checks_skipped += 1;
+                continue;
+            }
+            PathPresence::Present => {}
         }
 
-        // Check if the file exists on disk
-        let path = Path::new(&entry.full_path);
-        if !path.exists() {
+        if probe(Path::new(&entry.full_path)) == PathPresence::Missing {
             debug!("File no longer exists: {}", entry.full_path);
             result.ids_to_delete.push(entry.id);
             result.files_removed += 1;
@@ -362,6 +490,38 @@ fn check_volume_entries(entries: Vec<EntryToCheck>) -> VolumeCheckResult {
     }
 
     result
+}
+
+/// Look up or probe a parent directory's presence and cache the result.
+fn probe_cached_parent(
+    parent_path: &str,
+    existing_directories: &mut HashSet<String>,
+    missing_directories: &mut HashSet<String>,
+    unknown_directories: &mut HashSet<String>,
+    probe: &(impl Fn(&Path) -> PathPresence + Sync),
+) -> PathPresence {
+    if existing_directories.contains(parent_path) {
+        return PathPresence::Present;
+    }
+    if missing_directories.contains(parent_path) {
+        return PathPresence::Missing;
+    }
+    if unknown_directories.contains(parent_path) {
+        return PathPresence::Unknown;
+    }
+    let presence = probe(Path::new(parent_path));
+    match presence {
+        PathPresence::Present => {
+            existing_directories.insert(parent_path.to_string());
+        }
+        PathPresence::Missing => {
+            missing_directories.insert(parent_path.to_string());
+        }
+        PathPresence::Unknown => {
+            unknown_directories.insert(parent_path.to_string());
+        }
+    }
+    presence
 }
 
 /// Check if any parent directory of the given path is in the missing set.
@@ -431,7 +591,7 @@ fn get_all_entries(database: &Database) -> Result<Vec<EntryToCheck>> {
     let mut statement = connection
         .prepare(
             r"
-            SELECT id, full_path, is_directory
+            SELECT id, volume_id, full_path, is_directory
             FROM files
             ",
         )
@@ -441,8 +601,9 @@ fn get_all_entries(database: &Database) -> Result<Vec<EntryToCheck>> {
         .query_map([], |row| {
             Ok(EntryToCheck {
                 id: row.get(0)?,
-                full_path: row.get(1)?,
-                is_directory: row.get(2)?,
+                volume_id: row.get(1)?,
+                full_path: row.get(2)?,
+                is_directory: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -462,7 +623,7 @@ fn get_entries_for_volume(database: &Database, volume_id: i64, max_id: Option<i6
         let mut statement = connection
             .prepare(
                 r"
-                SELECT id, full_path, is_directory
+                SELECT id, volume_id, full_path, is_directory
                 FROM files
                 WHERE volume_id = ?1 AND id <= ?2
                 ",
@@ -473,8 +634,9 @@ fn get_entries_for_volume(database: &Database, volume_id: i64, max_id: Option<i6
             .query_map([volume_id, max], |row| {
                 Ok(EntryToCheck {
                     id: row.get(0)?,
-                    full_path: row.get(1)?,
-                    is_directory: row.get(2)?,
+                    volume_id: row.get(1)?,
+                    full_path: row.get(2)?,
+                    is_directory: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -483,7 +645,7 @@ fn get_entries_for_volume(database: &Database, volume_id: i64, max_id: Option<i6
         let mut statement = connection
             .prepare(
                 r"
-                SELECT id, full_path, is_directory
+                SELECT id, volume_id, full_path, is_directory
                 FROM files
                 WHERE volume_id = ?1
                 ",
@@ -494,8 +656,9 @@ fn get_entries_for_volume(database: &Database, volume_id: i64, max_id: Option<i6
             .query_map([volume_id], |row| {
                 Ok(EntryToCheck {
                     id: row.get(0)?,
-                    full_path: row.get(1)?,
-                    is_directory: row.get(2)?,
+                    volume_id: row.get(1)?,
+                    full_path: row.get(2)?,
+                    is_directory: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -750,16 +913,19 @@ mod tests {
         let entries = vec![
             EntryToCheck {
                 id: 1,
+                volume_id: 1,
                 full_path: "C:\\file1.txt".to_string(),
                 is_directory: false,
             },
             EntryToCheck {
                 id: 2,
+                volume_id: 1,
                 full_path: "C:\\file2.txt".to_string(),
                 is_directory: false,
             },
             EntryToCheck {
                 id: 3,
+                volume_id: 2,
                 full_path: "D:\\file3.txt".to_string(),
                 is_directory: false,
             },
@@ -884,5 +1050,175 @@ mod tests {
         assert_eq!(stats.files_removed, 0);
         assert_eq!(stats.directories_removed, 0);
         assert_eq!(stats.entries_checked, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_prune_presence_safety {
+    use std::fs::{self, File};
+
+    use filefind_common::FileEntry;
+    use filefind_common::types::{IndexedVolume, VolumeType};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn offline_volume_root_preserves_all_entries() {
+        let database = Database::open_in_memory().unwrap();
+        let temp = tempdir().unwrap();
+        let offline_root = temp.path().join("unmounted-drive");
+        let root_str = offline_root.to_string_lossy().into_owned();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new("OFFLINE-VOL".into(), root_str, VolumeType::Network))
+            .unwrap();
+        let nested_dir = offline_root.join("Movies");
+        let nested_file = nested_dir.join("film.mkv");
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "Movies".into(),
+                nested_dir.to_string_lossy().into_owned(),
+                true,
+            ))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "film.mkv".into(),
+                nested_file.to_string_lossy().into_owned(),
+                false,
+            ))
+            .unwrap();
+
+        let stats = prune_missing_entries(&database, false).unwrap();
+        assert_eq!(stats.files_removed, 0);
+        assert_eq!(stats.directories_removed, 0);
+        assert!(
+            database
+                .get_file_by_path(&nested_dir.to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            database
+                .get_file_by_path(&nested_file.to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_directory_preserves_indexed_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let database = Database::open_in_memory().unwrap();
+        let temp = tempdir().unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new(
+                "PERM-VOL".into(),
+                temp.path().to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+
+        let restricted = temp.path().join("restricted");
+        fs::create_dir(&restricted).unwrap();
+        let child = restricted.join("secret.txt");
+        File::create(&child).unwrap();
+        let gone = temp.path().join("gone.txt");
+
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "restricted".into(),
+                restricted.to_string_lossy().into_owned(),
+                true,
+            ))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "secret.txt".into(),
+                child.to_string_lossy().into_owned(),
+                false,
+            ))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "gone.txt".into(),
+                gone.to_string_lossy().into_owned(),
+                false,
+            ))
+            .unwrap();
+
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o000)).unwrap();
+        let is_effective_root = fs::symlink_metadata(&child).is_ok();
+        let result = prune_missing_entries(&database, false);
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let stats = result.unwrap();
+        assert_eq!(stats.files_removed, 1);
+        assert!(database.get_file_by_path(&gone.to_string_lossy()).unwrap().is_none());
+        if !is_effective_root {
+            assert!(
+                database
+                    .get_file_by_path(&restricted.to_string_lossy())
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(database.get_file_by_path(&child.to_string_lossy()).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn distinguishes_present_missing_and_unknown_with_descendants() {
+        let database = Database::open_in_memory().unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new(
+                "PROBE-VOL".into(),
+                "/data".into(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+
+        let entries = [
+            ("/data/present", true),
+            ("/data/present/kept.txt", false),
+            ("/data/missing", true),
+            ("/data/missing/child.txt", false),
+            ("/data/unknown", true),
+            ("/data/unknown/nested", true),
+            ("/data/unknown/nested/preserved.txt", false),
+        ];
+        for (path, is_directory) in entries {
+            let name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+            database
+                .insert_file(&FileEntry::new(volume_id, name, path.into(), is_directory))
+                .unwrap();
+        }
+
+        let probe = |path: &Path| match path.to_string_lossy().as_ref() {
+            "/data" | "/data/present" | "/data/present/kept.txt" => PathPresence::Present,
+            "/data/missing" | "/data/missing/child.txt" => PathPresence::Missing,
+            _ => PathPresence::Unknown,
+        };
+
+        let stats = prune_missing_entries_with_probe(&database, false, &probe).unwrap();
+        assert_eq!(stats.directories_removed, 1);
+        assert_eq!(stats.files_removed, 1);
+        assert!(database.get_file_by_path("/data/present/kept.txt").unwrap().is_some());
+        assert!(database.get_file_by_path("/data/missing").unwrap().is_none());
+        assert!(database.get_file_by_path("/data/missing/child.txt").unwrap().is_none());
+        assert!(database.get_file_by_path("/data/unknown").unwrap().is_some());
+        assert!(database.get_file_by_path("/data/unknown/nested").unwrap().is_some());
+        assert!(
+            database
+                .get_file_by_path("/data/unknown/nested/preserved.txt")
+                .unwrap()
+                .is_some()
+        );
     }
 }

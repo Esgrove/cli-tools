@@ -178,10 +178,10 @@ pub fn run_search(config: &CliConfig, database: &Database) -> Result<()> {
     };
 
     match config.output_format {
-        OutputFormat::Grouped => display_grouped_output(&directories, &files, config, &highlight_patterns, database),
-        OutputFormat::List => display_list(&directories, &files, config, &highlight_patterns, database),
-        OutputFormat::Name => display_name(&directories, &files, config, &highlight_patterns, database),
-        OutputFormat::Info => display_info(&directories, &files, config, &highlight_patterns, database),
+        OutputFormat::Grouped => display_grouped_output(&directories, &files, config, &highlight_patterns),
+        OutputFormat::List => display_list(&directories, &files, config, &highlight_patterns),
+        OutputFormat::Name => display_name(&directories, &files, config, &highlight_patterns),
+        OutputFormat::Info => display_info(&directories, &files, config, &highlight_patterns),
     }
 
     // Show search stats if verbose
@@ -363,7 +363,6 @@ fn display_grouped_output(
     files: &[&FileEntry],
     config: &CliConfig,
     highlight_patterns: &[&str],
-    database: &Database,
 ) {
     if config.files_only {
         // Files only mode: show full paths
@@ -374,11 +373,8 @@ fn display_grouped_output(
     } else if config.directories_only {
         // Dirs only mode: show full path with file count
         for directory in directories {
-            // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
-                // Directory no longer exists: print in red and remove from database
                 print_red_bold!("{}", &directory.full_path);
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -399,18 +395,12 @@ fn display_grouped_output(
         }
     } else {
         // Normal mode: group files under directories
-        display_grouped(directories, files, config, highlight_patterns, database);
+        display_grouped(directories, files, config, highlight_patterns);
     }
 }
 
 /// Display results grouped by directory.
-fn display_grouped(
-    directories: &[&FileEntry],
-    files: &[&FileEntry],
-    config: &CliConfig,
-    highlight_patterns: &[&str],
-    database: &Database,
-) {
+fn display_grouped(directories: &[&FileEntry], files: &[&FileEntry], config: &CliConfig, highlight_patterns: &[&str]) {
     // Group files by their parent directory
     let mut files_by_dir: HashMap<String, Vec<&FileEntry>> = HashMap::new();
     for file in files {
@@ -422,11 +412,8 @@ fn display_grouped(
 
     // First, show matched directories with their files
     for directory in directories {
-        // Check if directory exists on disk
         if !utils::check_directory_exists(&directory.full_path) {
-            // Directory no longer exists: print in red and remove from database
             print_red_bold!("{}", &directory.full_path);
-            delete_missing_directory(database, &directory.full_path);
             println!();
             continue;
         }
@@ -484,13 +471,7 @@ fn display_grouped(
 /// Display results as file/directory names only (no full paths).
 ///
 /// Same logic as `display_list` but prints only the name component of each entry.
-fn display_name(
-    directories: &[&FileEntry],
-    files: &[&FileEntry],
-    config: &CliConfig,
-    highlight_patterns: &[&str],
-    database: &Database,
-) {
+fn display_name(directories: &[&FileEntry], files: &[&FileEntry], config: &CliConfig, highlight_patterns: &[&str]) {
     if config.files_only {
         for file in files {
             let text = utils::highlight_match(&file.name, highlight_patterns);
@@ -500,7 +481,6 @@ fn display_name(
         for directory in directories {
             if !utils::check_directory_exists(&directory.full_path) {
                 print_red_bold!("{}", &directory.name);
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -515,7 +495,6 @@ fn display_name(
         for directory in directories {
             if !utils::check_directory_exists(&directory.full_path) {
                 print_red_bold!("{}", &directory.name);
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -534,13 +513,7 @@ fn display_name(
 }
 
 /// Display results in list format (full paths, no type or size information).
-fn display_list(
-    directories: &[&FileEntry],
-    files: &[&FileEntry],
-    config: &CliConfig,
-    highlight_patterns: &[&str],
-    database: &Database,
-) {
+fn display_list(directories: &[&FileEntry], files: &[&FileEntry], config: &CliConfig, highlight_patterns: &[&str]) {
     if config.files_only {
         for file in files {
             let text = utils::highlight_match(&file.full_path, highlight_patterns);
@@ -548,11 +521,8 @@ fn display_list(
         }
     } else if config.directories_only {
         for directory in directories {
-            // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
-                // Directory no longer exists: print in red and remove from database
                 print_red_bold!("{}", &directory.full_path);
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -567,11 +537,8 @@ fn display_list(
     } else {
         // Show directories first, then files (both already sorted by caller)
         for directory in directories {
-            // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
-                // Directory no longer exists: print in red and remove from database
                 print_red_bold!("{}", &directory.full_path);
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -590,13 +557,7 @@ fn display_list(
 }
 
 /// Display results in info format with size.
-fn display_info(
-    directories: &[&FileEntry],
-    files: &[&FileEntry],
-    config: &CliConfig,
-    highlight_patterns: &[&str],
-    database: &Database,
-) {
+fn display_info(directories: &[&FileEntry], files: &[&FileEntry], config: &CliConfig, highlight_patterns: &[&str]) {
     // Show directories first, then files (both already sorted by caller)
     if !config.files_only {
         if config.verbose {
@@ -624,7 +585,6 @@ fn display_info(
                     EntryStatus::MissingDirectory,
                     &config.hyperlinks,
                 );
-                delete_missing_directory(database, &directory.full_path);
                 continue;
             }
 
@@ -760,13 +720,6 @@ fn print_entry_info(entry: &FileEntry, highlight_patterns: &[&str], status: Entr
     };
 
     println!("{size_str}{count_str}  {path_display}");
-}
-
-/// Delete a missing directory and all files under it from the database.
-fn delete_missing_directory(database: &Database, path: &str) {
-    if let Err(error) = database.delete_files_under_path(path) {
-        print_error!("Failed to remove stale entries for {path}:\n{error}");
-    }
 }
 
 /// Search for results matching ANY pattern (OR mode).
@@ -1471,37 +1424,6 @@ mod tests {
         print_entry_info(&entry, &["big"], EntryStatus::File, &Hyperlinker::disabled());
     }
 
-    // ── delete_missing_directory ──────────────────────────────────
-
-    #[test]
-    fn test_delete_missing_directory_nonexistent_path_is_noop() {
-        let database = setup_database();
-        let stats_before = database.get_stats().expect("Failed to get stats");
-        let temp_dir = tempdir().expect("Failed to create temp directory");
-        let missing_path = temp_dir.path().join("missing").join("path");
-        // Deleting a path not in the database should be a no-op
-        delete_missing_directory(&database, &missing_path.to_string_lossy());
-        let stats_after = database.get_stats().expect("Failed to get stats");
-        assert_eq!(stats_before.total_files, stats_after.total_files);
-        assert_eq!(stats_before.total_directories, stats_after.total_directories);
-    }
-
-    #[test]
-    fn test_delete_missing_directory_removes_entries() {
-        let database = setup_database();
-
-        // Verify files exist before deletion
-        let before = database.search_by_name("readme", 10).expect("Search failed");
-        assert!(!before.is_empty());
-
-        // Delete directory and its contents
-        delete_missing_directory(&database, "C:\\Projects");
-
-        // Files under that directory should now be gone
-        let after = database.search_by_name("readme", 10).expect("Search failed");
-        assert!(after.is_empty());
-    }
-
     // ── get_volume_data ───────────────────────────────────────────
 
     #[test]
@@ -1580,7 +1502,6 @@ mod tests {
 
     #[test]
     fn test_display_grouped_output_files_only_skips_dirs() {
-        let database = setup_database();
         let config = CliConfig {
             files_only: true,
             ..search_config(vec!["test"])
@@ -1595,12 +1516,11 @@ mod tests {
         // With files_only, the dirs are passed but should be ignored by the display
         assert!(config.files_only);
         assert_eq!(files.len(), 2);
-        display_grouped_output(&dirs, &files, &config, &["test"], &database);
+        display_grouped_output(&dirs, &files, &config, &["test"]);
     }
 
     #[test]
     fn test_display_functions_with_hyperlinks_enabled() {
-        let database = setup_database();
         let config = CliConfig {
             hyperlinks: Hyperlinker::new(HyperlinkMode::Always, "file"),
             ..search_config(vec!["test"])
@@ -1618,15 +1538,14 @@ mod tests {
         );
 
         // Every format must stay panic free while emitting hyperlink sequences
-        display_grouped_output(&directories, &files, &config, &["test"], &database);
-        display_list(&directories, &files, &config, &["test"], &database);
-        display_name(&directories, &files, &config, &["test"], &database);
-        display_info(&directories, &files, &config, &["test"], &database);
+        display_grouped_output(&directories, &files, &config, &["test"]);
+        display_list(&directories, &files, &config, &["test"]);
+        display_name(&directories, &files, &config, &["test"]);
+        display_info(&directories, &files, &config, &["test"]);
     }
 
     #[test]
     fn test_display_grouped_output_dirs_only_checks_existence() {
-        let database = setup_database();
         let temp = tempdir().expect("Failed to create temp directory");
         let temp_path = temp.path().to_string_lossy().to_string();
         let config = CliConfig {
@@ -1639,12 +1558,11 @@ mod tests {
         let dirs: Vec<&FileEntry> = dir_owned.iter().collect();
         let files: Vec<&FileEntry> = Vec::new();
         assert!(config.directories_only);
-        display_grouped_output(&dirs, &files, &config, &["test"], &database);
+        display_grouped_output(&dirs, &files, &config, &["test"]);
     }
 
     #[test]
     fn test_display_name_files_only_uses_name_not_path() {
-        let database = setup_database();
         let config = CliConfig {
             files_only: true,
             ..search_config(vec!["readme"])
@@ -1655,12 +1573,11 @@ mod tests {
         // In name mode, display uses file.name not file.full_path
         assert_eq!(files[0].name, "readme.txt");
         assert_ne!(files[0].name, files[0].full_path);
-        display_name(&dirs, &files, &config, &["readme"], &database);
+        display_name(&dirs, &files, &config, &["readme"]);
     }
 
     #[test]
     fn test_display_list_files_only_uses_full_path() {
-        let database = setup_database();
         let config = CliConfig {
             files_only: true,
             ..search_config(vec!["readme"])
@@ -1670,12 +1587,11 @@ mod tests {
         let dirs: Vec<&FileEntry> = Vec::new();
         // In list mode, display uses file.full_path
         assert_eq!(files[0].full_path, "C:\\Projects\\readme.txt");
-        display_list(&dirs, &files, &config, &["readme"], &database);
+        display_list(&dirs, &files, &config, &["readme"]);
     }
 
     #[test]
     fn test_display_info_shows_file_size() {
-        let database = setup_database();
         let config = CliConfig {
             files_only: true,
             ..search_config(vec!["test"])
@@ -1689,12 +1605,11 @@ mod tests {
         // Info mode displays each file's size. Verify the data is set up correctly
         assert_eq!(files[0].size, 100);
         assert_eq!(files[1].size, 5_000_000);
-        display_info(&dirs, &files, &config, &["test"], &database);
+        display_info(&dirs, &files, &config, &["test"]);
     }
 
     #[test]
     fn test_display_info_dirs_only_calculates_dir_sizes() {
-        let database = setup_database();
         let temp = tempdir().expect("Failed to create temp directory");
         let temp_path = temp.path().to_string_lossy().to_string();
         let config = CliConfig {
@@ -1710,12 +1625,11 @@ mod tests {
             !dir_sizes.contains_key(&temp_path),
             "No files under dir, so size map should have no entry"
         );
-        display_info(&dirs, &files, &config, &[], &database);
+        display_info(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_info_verbose_shows_headers() {
-        let database = setup_database();
         let config = CliConfig {
             verbose: true,
             files_only: true,
@@ -1726,57 +1640,52 @@ mod tests {
         let files_owned = [make_file("test.txt", "C:\\test.txt", 100)];
         let files: Vec<&FileEntry> = files_owned.iter().collect();
         let dirs: Vec<&FileEntry> = Vec::new();
-        display_info(&dirs, &files, &config, &["test"], &database);
+        display_info(&dirs, &files, &config, &["test"]);
     }
 
     #[test]
     fn test_display_grouped_empty_dirs_and_files() {
-        let database = setup_database();
         let config = search_config(vec!["test"]);
         let dirs: Vec<&FileEntry> = Vec::new();
         let files: Vec<&FileEntry> = Vec::new();
         // Both empty. Should produce no output without panicking
         assert!(dirs.is_empty());
         assert!(files.is_empty());
-        display_grouped_output(&dirs, &files, &config, &[], &database);
+        display_grouped_output(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_name_empty_dirs_and_files() {
-        let database = setup_database();
         let config = search_config(vec![]);
         let dirs: Vec<&FileEntry> = Vec::new();
         let files: Vec<&FileEntry> = Vec::new();
         assert!(dirs.is_empty());
         assert!(files.is_empty());
-        display_name(&dirs, &files, &config, &[], &database);
+        display_name(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_list_empty_dirs_and_files() {
-        let database = setup_database();
         let config = search_config(vec![]);
         let dirs: Vec<&FileEntry> = Vec::new();
         let files: Vec<&FileEntry> = Vec::new();
         assert!(dirs.is_empty());
         assert!(files.is_empty());
-        display_list(&dirs, &files, &config, &[], &database);
+        display_list(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_info_empty_dirs_and_files() {
-        let database = setup_database();
         let config = search_config(vec![]);
         let dirs: Vec<&FileEntry> = Vec::new();
         let files: Vec<&FileEntry> = Vec::new();
         assert!(dirs.is_empty());
         assert!(files.is_empty());
-        display_info(&dirs, &files, &config, &[], &database);
+        display_info(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_info_sort_dirs_by_size_ordering() {
-        let database = setup_database();
         let temp = tempdir().expect("Failed to create temp directory");
         let temp_path = temp.path().to_string_lossy().to_string();
         let config = CliConfig {
@@ -1804,12 +1713,11 @@ mod tests {
         );
         assert!(matches!(config.sort_by, SortBy::Size));
 
-        display_info(&dirs, &files, &config, &[], &database);
+        display_info(&dirs, &files, &config, &[]);
     }
 
     #[test]
     fn test_display_grouped_groups_files_by_parent() {
-        let database = setup_database();
         let config = search_config(vec!["file"]);
         let parent_a = native_path(&["DirA"]);
         let parent_b = native_path(&["DirB"]);
@@ -1832,7 +1740,7 @@ mod tests {
         assert_eq!(files_by_dir[&parent_a].len(), 2);
         assert_eq!(files_by_dir[&parent_b].len(), 1);
 
-        display_grouped(&dirs, &files, &config, &["file"], &database);
+        display_grouped(&dirs, &files, &config, &["file"]);
     }
 
     // ── run_search integration ────────────────────────────────────
@@ -2315,5 +2223,85 @@ mod test_mapped_search_entries {
         assert_eq!(prepared.len(), 1);
         assert_eq!(prepared[0].stored.full_path, r"\\nas\share\movies\movie.mkv");
         assert_eq!(prepared[0].display.full_path, r"X:\movies\movie.mkv");
+    }
+}
+
+#[cfg(test)]
+mod test_readonly_rendering {
+    use filefind_common::types::{IndexedVolume, VolumeType};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::hyperlink::Hyperlinker;
+
+    #[test]
+    fn rendering_inaccessible_directory_never_deletes_index_entries() {
+        let temp = TempDir::new().unwrap();
+        let database = Database::open_in_memory().unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new(
+                "READONLY-VOL".into(),
+                temp.path().to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        let missing_dir = temp.path().join("unreachable_share");
+        let child_file = missing_dir.join("movie.mkv");
+        let dir_path = missing_dir.to_string_lossy().into_owned();
+        let child_path = child_file.to_string_lossy().into_owned();
+
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "unreachable_share".into(),
+                dir_path.clone(),
+                true,
+            ))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(
+                volume_id,
+                "movie.mkv".into(),
+                child_path.clone(),
+                false,
+            ))
+            .unwrap();
+
+        for format in [
+            OutputFormat::Grouped,
+            OutputFormat::List,
+            OutputFormat::Name,
+            OutputFormat::Info,
+        ] {
+            let config = CliConfig {
+                command: None,
+                patterns: vec!["unreachable_share".to_string()],
+                match_all: false,
+                regex: false,
+                case_sensitive: false,
+                drives: Vec::new(),
+                files_only: false,
+                directories_only: false,
+                files_per_dir: 20,
+                output_format: format,
+                sort_by: SortBy::Name,
+                verbose: false,
+                database_path: temp.path().join("filefind.db"),
+                path_mappings: HashMap::new(),
+                move_to: None,
+                force_overwrite: false,
+                hyperlinks: Hyperlinker::disabled(),
+            };
+
+            run_search(&config, &database).unwrap();
+            assert!(
+                database.get_file_by_path(&dir_path).unwrap().is_some(),
+                "format {format:?} must not delete directory from index"
+            );
+            assert!(
+                database.get_file_by_path(&child_path).unwrap().is_some(),
+                "format {format:?} must not delete child file from index"
+            );
+        }
     }
 }
