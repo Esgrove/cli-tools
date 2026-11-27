@@ -349,6 +349,9 @@ so a project that pulls in one tool does not build the others.
   and `print_yellow!` are defined in `crates/common/src/lib.rs`
 - Use descriptive variable and function names. No single character variables.
 - Prefer full names over abbreviations. For example: `directories` instead of `dirs`.
+- Prefer small structs with descriptive named fields over tuples in struct fields, return types,
+  parameters, and collections, unless the tuple is genuinely trivial or immediately obvious
+  (such as a `(start, end)` range or a standard `(key, value)` pair).
 - Create docstrings for structs and functions.
 - Avoid trailing comments.
 

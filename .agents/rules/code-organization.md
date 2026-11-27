@@ -64,6 +64,9 @@ These rules apply to first-party Rust sources and shell scripts in the workspace
 - Use `anyhow` with `Result<T>` return types for error handling.
 - Use `clap` derive macros. Every CLI argument has both a short and a long option.
 - Use descriptive names, no single character variables, and full names over abbreviations.
+- Prefer small structs with descriptive named fields over tuples in struct fields, return types,
+  parameters, and collections, unless the tuple is genuinely trivial or immediately obvious
+  (such as a `(start, end)` range or a standard `(key, value)` pair).
 - Performance targets are Apple Silicon NEON (M1 and newer) and x86-64 with AVX2 as the minimum.
   Memory use is not an optimization goal, so trade memory for speed freely. See "Performance targets" in `AGENTS.md`.
 
