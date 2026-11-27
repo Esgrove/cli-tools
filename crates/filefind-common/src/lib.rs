@@ -24,7 +24,7 @@ pub mod database;
 pub mod ipc;
 pub mod types;
 
-pub use config::{CONFIG_PATH, LogLevel, PathMapping, UserConfig as Config};
+pub use config::{CONFIG_PATH, CONFIG_PATH_ENV, LogLevel, PathMapping, UserConfig as Config};
 pub use database::{Database, VolumeStats};
 #[cfg(feature = "ipc")]
 pub use ipc::{

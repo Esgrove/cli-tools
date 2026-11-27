@@ -1,7 +1,9 @@
 //! User configuration handling for filefind.
 //!
-//! Configuration is read from `~/.config/filefind.toml`.
+//! Configuration is read from `~/.config/filefind.toml`,
+//! or from the file named by the `FILEFIND_CONFIG` environment variable.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -14,13 +16,14 @@ use tracing_subscriber::filter::LevelFilter;
 
 const PROJECT_NAME: &str = "filefind";
 
-/// Path to the user configuration file.
-pub static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    let home_dir = dirs::home_dir()?;
-    let config_path = home_dir.join(".config").join(format!("{PROJECT_NAME}.toml"));
+/// Environment variable naming a config file to use instead of `~/.config/filefind.toml`.
+///
+/// Tests and other tools use it to point filefind at a separate config and database.
+pub const CONFIG_PATH_ENV: &str = "FILEFIND_CONFIG";
 
-    if config_path.exists() { Some(config_path) } else { None }
-});
+/// Path to the user configuration file.
+pub static CONFIG_PATH: LazyLock<Option<PathBuf>> =
+    LazyLock::new(|| resolve_config_path(std::env::var_os(CONFIG_PATH_ENV), dirs::home_dir()));
 
 /// Path to the default database file.
 pub static DATABASE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -409,6 +412,18 @@ const fn default_true() -> bool {
 
 fn default_hyperlink_scheme() -> String {
     String::from("file")
+}
+
+/// Resolve the config file from the `FILEFIND_CONFIG` value and the home directory.
+///
+/// A non-empty override is used when the file exists, otherwise `~/.config/filefind.toml` is used when it exists.
+fn resolve_config_path(override_path: Option<OsString>, home_dir: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(override_path) = override_path.filter(|value| !value.is_empty()) {
+        let config_path = PathBuf::from(override_path);
+        return config_path.exists().then_some(config_path);
+    }
+    let config_path = home_dir?.join(".config").join(format!("{PROJECT_NAME}.toml"));
+    config_path.exists().then_some(config_path)
 }
 
 #[cfg(test)]
@@ -971,5 +986,59 @@ log_level = "{level_str}"
                 "Config log_level '{level_str}' should parse to {expected:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_resolve_config_path {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn override_wins_over_the_home_config() {
+        let temp = TempDir::new().unwrap();
+        let override_file = temp.path().join("custom.toml");
+        fs::write(&override_file, "").unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".config").join("filefind.toml"), "").unwrap();
+
+        let resolved = resolve_config_path(Some(override_file.clone().into_os_string()), Some(home));
+
+        assert_eq!(resolved, Some(override_file));
+    }
+
+    #[test]
+    fn missing_override_file_resolves_to_no_config() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".config").join("filefind.toml"), "").unwrap();
+
+        let resolved = resolve_config_path(Some(temp.path().join("missing.toml").into_os_string()), Some(home));
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn empty_override_falls_back_to_the_home_config() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join(".config")).unwrap();
+        let home_config = home.join(".config").join("filefind.toml");
+        fs::write(&home_config, "").unwrap();
+
+        let resolved = resolve_config_path(Some(OsString::new()), Some(home));
+
+        assert_eq!(resolved, Some(home_config));
+    }
+
+    #[test]
+    fn no_override_and_no_home_config_resolves_to_no_config() {
+        let temp = TempDir::new().unwrap();
+
+        assert_eq!(resolve_config_path(None, Some(temp.path().to_path_buf())), None);
+        assert_eq!(resolve_config_path(None, None), None);
     }
 }

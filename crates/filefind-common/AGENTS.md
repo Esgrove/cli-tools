@@ -40,7 +40,8 @@ The other filefind crates have their own `AGENTS.md`:
 
 ## Configuration
 
-User configuration is read from `~/.config/filefind.toml`.
+User configuration is read from `~/.config/filefind.toml`,
+or from the file the `FILEFIND_CONFIG` environment variable names.
 See `filefind.toml` in the repo root for an example.
 Remember to update the example config file when adding new config options.
 
