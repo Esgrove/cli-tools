@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use cli_tools_common::{format_number, print_cyan, print_error, print_green, print_yellow};
 use colored::Colorize;
+use filefind_common::scope::find_most_specific_volume;
 use filefind_common::{
-    Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IpcClient, extract_drive_letter_from_str,
+    Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IndexScope, IpcClient, extract_drive_letter_from_str,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -32,7 +33,7 @@ use crate::mft::detect_ntfs_volumes;
 use crate::pruner::prune_missing_entries;
 use crate::scanner::{deleted_references, run_scan};
 use crate::usn::{UsnChange, UsnMonitor};
-use crate::watcher::{FileWatcher, matches_exclude_patterns};
+use crate::watcher::FileWatcher;
 
 /// Default USN Journal poll interval in milliseconds.
 const DEFAULT_USN_POLL_INTERVAL_MS: u64 = 1000;
@@ -69,8 +70,8 @@ pub struct Daemon {
     /// Cache of MFT file reference to full path (for path resolution).
     path_cache: HashMap<(char, u64), String>,
 
-    /// Drive letter to indexed volume ID for change processing.
-    volume_ids: HashMap<char, i64>,
+    /// Cached `(volume_id, mount_point)` pairs for component-aware volume lookup.
+    volume_mounts: Vec<(i64, String)>,
 
     /// Shared state for IPC server.
     ipc_state: Arc<IpcServerState>,
@@ -152,7 +153,7 @@ impl Daemon {
             file_watcher: None,
             watcher_receiver: None,
             path_cache: HashMap::new(),
-            volume_ids: HashMap::new(),
+            volume_mounts: Vec::new(),
             ipc_state: Arc::new(IpcServerState::new()),
             ipc_receiver: None,
             is_paused: false,
@@ -518,9 +519,9 @@ impl Daemon {
 
     /// Start file watcher for non-NTFS paths.
     fn start_file_watcher(&mut self, paths: Vec<PathBuf>) -> Result<()> {
-        let watcher = FileWatcher::new(
+        let watcher = FileWatcher::with_scope(
             paths,
-            self.config.daemon.exclude.clone(),
+            IndexScope::from_daemon_config(&self.config.daemon),
             self.options.watcher_debounce_ms,
             true,
         );
@@ -871,20 +872,9 @@ impl Daemon {
     }
 
     fn should_index_path(&self, path: &str) -> bool {
-        if matches_exclude_patterns(path, &self.config.daemon.exclude) {
-            return false;
-        }
-        if self.config.daemon.paths.is_empty() {
-            return true;
-        }
-        let normalized = path.replace('/', "\\").to_lowercase();
-        self.config.daemon.paths.iter().any(|configured| {
-            let root = configured.replace('/', "\\").trim_end_matches('\\').to_lowercase();
-            normalized == root
-                || normalized
-                    .strip_prefix(&root)
-                    .is_some_and(|suffix| root.ends_with(':') || suffix.starts_with('\\'))
-        })
+        let scope = IndexScope::from_daemon_config(&self.config.daemon);
+        let volume_mount = find_most_specific_volume(path, &self.volume_mounts).map(|(_, mount)| mount);
+        scope.is_included(path, volume_mount)
     }
 
     /// Handle a file change event by updating the database.
@@ -985,22 +975,13 @@ impl Daemon {
         true
     }
 
-    /// Move an indexed directory and every entry under it to the renamed path.
-    ///
-    /// Entries already indexed under the new path are stale, since the renamed directory now occupies it,
-    /// so they are removed first to keep the full paths unique.
+    /// Move an indexed directory and every entry under it to the renamed path in one transaction.
     fn rename_indexed_directory(db: &Database, from: &Path, to: &Path) -> bool {
         let from_str = from.to_string_lossy();
         let to_str = to.to_string_lossy();
-        let new_name = to
-            .file_name()
-            .map_or_else(|| to_str.to_string(), |name| name.to_string_lossy().to_string());
+        let new_name = filefind_common::scope::extract_entry_name(&to_str);
 
-        if let Err(error) = db.delete_files_under_path(&to_str) {
-            error!("Failed to clear stale entries under {}: {}", to.display(), error);
-            return false;
-        }
-        match db.rebase_files_under_path(&from_str, &to_str, &new_name) {
+        match db.reconcile_moved_directory(&from_str, &to_str, new_name) {
             Ok(moved) => {
                 debug!(
                     "Moved {} indexed entries from {} to {}",
@@ -1022,24 +1003,15 @@ impl Daemon {
         }
     }
 
-    /// Get the volume ID for a given path by looking up the drive letter.
+    /// Get the most specific indexed volume ID for `path` using component-aware mount matching.
     fn get_volume_id_for_path(&self, path: &std::path::Path) -> Option<i64> {
         let path_str = path.to_string_lossy();
-        let drive_letter = path_str.chars().next()?;
+        if let Some((volume_id, _)) = find_most_specific_volume(&path_str, &self.volume_mounts) {
+            return Some(volume_id);
+        }
 
         let db = self.database.as_ref()?;
-
-        // Query volume by mount point (drive letter)
-        let mount_point = format!("{}:", drive_letter.to_ascii_uppercase());
-        if let Some(volume_id) = self.volume_ids.get(&drive_letter.to_ascii_uppercase()) {
-            return Some(*volume_id);
-        }
-        let volumes = db.get_all_volumes().ok()?;
-
-        volumes
-            .iter()
-            .find(|volume| volume.mount_point.eq_ignore_ascii_case(&mount_point))
-            .and_then(|volume| volume.id)
+        db.get_volume_id_for_path(&path_str).ok().flatten()
     }
 
     /// Build the path cache from the database for faster path resolution.
@@ -1049,12 +1021,10 @@ impl Daemon {
         };
 
         let volumes = db.get_all_volumes()?;
-        self.volume_ids.clear();
-        for volume in volumes {
-            if let Some((drive, volume_id)) = volume.mount_point.chars().next().zip(volume.id) {
-                self.volume_ids.insert(drive.to_ascii_uppercase(), volume_id);
-            }
-        }
+        self.volume_mounts = volumes
+            .into_iter()
+            .filter_map(|volume| volume.id.map(|id| (id, volume.mount_point)))
+            .collect();
 
         // Query all directories with MFT references
         self.path_cache.clear();
@@ -3331,9 +3301,7 @@ mod tests {
             })
             .expect("insert entry");
         daemon.database = Some(database);
-        if !cfg!(windows) {
-            daemon.volume_ids.insert('/', volume_id);
-        }
+        daemon.build_path_cache().expect("build path cache");
 
         assert!(daemon.handle_change_event_with_reference(
             FileChangeEvent::Renamed {
@@ -3430,5 +3398,83 @@ mod tests {
             daemon.resolve_usn_path_inner('C', 5, "pagefile.sys"),
             Some("C:\\pagefile.sys".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod test_multi_root_ownership {
+    use filefind_common::types::{IndexedVolume, VolumeType};
+
+    use super::*;
+
+    #[test]
+    fn multiple_unix_roots_and_unc_shares_keep_distinct_volume_ids() {
+        let mut daemon = Daemon::new(Config::default(), DaemonOptions::default());
+        let database = Database::open_in_memory().unwrap();
+        let unix_a = database
+            .upsert_volume(&IndexedVolume::new(
+                "UNIX-A".into(),
+                "/data/a".into(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        let unix_b = database
+            .upsert_volume(&IndexedVolume::new(
+                "UNIX-B".into(),
+                "/data/b".into(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        let unc_a = database
+            .upsert_volume(&IndexedVolume::new(
+                "UNC-A".into(),
+                r"\\nas\media".into(),
+                VolumeType::Network,
+            ))
+            .unwrap();
+        let unc_b = database
+            .upsert_volume(&IndexedVolume::new(
+                "UNC-B".into(),
+                r"\\nas\backup".into(),
+                VolumeType::Network,
+            ))
+            .unwrap();
+
+        daemon.database = Some(database);
+        daemon.build_path_cache().unwrap();
+
+        assert_eq!(
+            daemon.get_volume_id_for_path(Path::new("/data/a/file.txt")),
+            Some(unix_a)
+        );
+        assert_eq!(
+            daemon.get_volume_id_for_path(Path::new("/data/b/file.txt")),
+            Some(unix_b)
+        );
+        assert_eq!(daemon.get_volume_id_for_path(Path::new("/data/a-extra/file.txt")), None);
+        assert_eq!(
+            daemon.get_volume_id_for_path(Path::new(r"\\nas\media\film.mkv")),
+            Some(unc_a)
+        );
+        assert_eq!(
+            daemon.get_volume_id_for_path(Path::new(r"\\nas\backup\dump.tar")),
+            Some(unc_b)
+        );
+    }
+
+    #[test]
+    fn should_index_path_applies_exclude_patterns_and_hidden_rules() {
+        let mut config = Config::default();
+        config.daemon.paths = vec!["/data/work".into()];
+        config.daemon.exclude = vec!["target".into()];
+        config.daemon.exclude_patterns = vec!["*.tmp".into(), "~$*".into()];
+        let daemon = Daemon::new(config, DaemonOptions::default());
+
+        assert!(daemon.should_index_path("/data/work/src/main.rs"));
+        assert!(!daemon.should_index_path("/data/work/draft.tmp"));
+        assert!(!daemon.should_index_path("/data/work/~$sheet.xlsx"));
+        assert!(!daemon.should_index_path("/data/work/.hidden"));
+        assert!(!daemon.should_index_path("/data/work/target/debug"));
+        assert!(!daemon.should_index_path("/data/work-extra/main.rs"));
     }
 }

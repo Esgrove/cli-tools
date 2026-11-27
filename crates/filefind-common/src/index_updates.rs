@@ -17,6 +17,7 @@ use cli_tools_common::PathChange;
 
 use crate::config::UserConfig;
 use crate::database::Database;
+use crate::scope::{IndexScope, is_path_within_root, path_to_utf8};
 
 /// What applying one change did to the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +45,8 @@ struct RootMatch {
 pub struct IndexUpdater {
     /// The opened index database.
     database: Database,
-    /// The configured index roots, where an empty list means every indexed volume.
-    indexed_roots: Vec<String>,
+    /// Shared root and exclusion policy from `[daemon]`.
+    scope: IndexScope,
 }
 
 /// Counts of what applying a batch of changes did to the index.
@@ -87,7 +88,7 @@ impl IndexUpdater {
             .with_context(|| format!("Failed to open the filefind index: {}", database_path.display()))?;
         Ok(Some(Self {
             database,
-            indexed_roots: config.daemon.paths.clone(),
+            scope: IndexScope::from_daemon_config(&config.daemon),
         }))
     }
 
@@ -120,7 +121,7 @@ impl IndexUpdater {
     fn collect_stored_roots(&self) -> Result<Vec<String>> {
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
-        for root in &self.indexed_roots {
+        for root in &self.scope.roots {
             if !root.is_empty() && seen.insert(root.clone()) {
                 roots.push(root.clone());
             }
@@ -136,9 +137,12 @@ impl IndexUpdater {
     /// Apply one change to the index.
     fn apply_change(&self, change: &PathChange, stored_roots: &[String]) -> Result<ChangeOutcome> {
         match change {
-            PathChange::Moved { from, to, .. } => {
-                self.apply_move(&absolute_path_string(from)?, &absolute_path_string(to)?, stored_roots)
-            }
+            PathChange::Moved { from, to, is_directory } => self.apply_move(
+                &absolute_path_string(from)?,
+                &absolute_path_string(to)?,
+                *is_directory,
+                stored_roots,
+            ),
             PathChange::Removed { path, is_directory } => {
                 self.apply_removal(&absolute_path_string(path)?, *is_directory, stored_roots)
             }
@@ -146,13 +150,24 @@ impl IndexUpdater {
     }
 
     /// Move the indexed entry at `from`, and everything under it for a directory, to `to`.
-    fn apply_move(&self, from: &str, to: &str, stored_roots: &[String]) -> Result<ChangeOutcome> {
-        let Some((resolved_from, entry)) = self.find_indexed_entry(from, stored_roots)? else {
+    fn apply_move(
+        &self,
+        from: &str,
+        to: &str,
+        is_directory_hint: bool,
+        stored_roots: &[String],
+    ) -> Result<ChangeOutcome> {
+        let (resolved_from, is_directory) = if let Some((path, entry)) = self.find_indexed_entry(from, stored_roots)? {
+            (path, is_directory_hint || entry.is_directory)
+        } else if is_directory_hint && let Some(path) = self.find_indexed_subtree(from, stored_roots)? {
+            (path, true)
+        } else {
             return Ok(ChangeOutcome::NotIndexed);
         };
+
         let resolved_to = resolve_destination_path(to, stored_roots);
         if !self.is_indexed_location(&resolved_to)? {
-            if entry.is_directory {
+            if is_directory {
                 self.database.delete_files_under_path(&resolved_from)?;
             } else {
                 self.database.delete_file_by_path(&resolved_from)?;
@@ -160,15 +175,16 @@ impl IndexUpdater {
             return Ok(ChangeOutcome::Removed);
         }
 
-        let new_name = Path::new(&resolved_to)
-            .file_name()
-            .map_or_else(|| resolved_to.clone(), |name| name.to_string_lossy().to_string());
-        if entry.is_directory {
-            // Entries already indexed under the new path are stale, since the moved directory now occupies it.
-            self.database.delete_files_under_path(&resolved_to)?;
-            self.database
-                .rebase_files_under_path(&resolved_from, &resolved_to, &new_name)?;
-            return Ok(ChangeOutcome::Moved);
+        let new_name = crate::scope::extract_entry_name(&resolved_to).to_string();
+        if is_directory {
+            let moved = self
+                .database
+                .reconcile_moved_directory(&resolved_from, &resolved_to, &new_name)?;
+            return Ok(if moved > 0 {
+                ChangeOutcome::Moved
+            } else {
+                ChangeOutcome::NotIndexed
+            });
         }
         if self
             .database
@@ -195,15 +211,11 @@ impl IndexUpdater {
             });
         }
 
-        if is_directory {
-            if self.database.delete_files_under_path(path)? > 0 {
-                return Ok(ChangeOutcome::Removed);
-            }
-            for candidate in alias_candidates(path, stored_roots) {
-                if self.database.delete_files_under_path(&candidate.mapped_path)? > 0 {
-                    return Ok(ChangeOutcome::Removed);
-                }
-            }
+        if is_directory
+            && let Some(resolved_path) = self.find_indexed_subtree(path, stored_roots)?
+            && self.database.delete_files_under_path(&resolved_path)? > 0
+        {
+            return Ok(ChangeOutcome::Removed);
         }
 
         Ok(ChangeOutcome::NotIndexed)
@@ -243,12 +255,42 @@ impl IndexUpdater {
         Ok(None)
     }
 
-    /// Check whether `path` is on an indexed volume and inside the configured index roots.
-    fn is_indexed_location(&self, path: &str) -> Result<bool> {
-        if self.database.get_volume_id_for_path(path)?.is_none() {
-            return Ok(false);
+    /// Find `path` or an unambiguous aliased root spelling that has indexed descendants.
+    fn find_indexed_subtree(&self, path: &str, stored_roots: &[String]) -> Result<Option<String>> {
+        if self.database.has_entries_under_path(path)? {
+            return Ok(Some(path.to_string()));
         }
-        Ok(self.indexed_roots.is_empty() || self.indexed_roots.iter().any(|root| is_within_root(path, root)))
+
+        let candidates = alias_candidates(path, stored_roots);
+        let mut cursor = 0;
+        while let Some(first) = candidates.get(cursor) {
+            let depth = first.relative_depth;
+            let mut depth_matches = Vec::new();
+            while let Some(candidate) = candidates.get(cursor)
+                && candidate.relative_depth == depth
+            {
+                if self.database.has_entries_under_path(&candidate.mapped_path)? {
+                    depth_matches.push(candidate.mapped_path.clone());
+                }
+                cursor += 1;
+            }
+            if depth_matches.len() == 1 {
+                return Ok(depth_matches.into_iter().next());
+            }
+            if depth_matches.len() > 1 {
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Check whether `path` is on an indexed volume, inside configured roots, and not excluded.
+    fn is_indexed_location(&self, path: &str) -> Result<bool> {
+        let Some((_, volume_mount)) = self.database.get_volume_for_path(path)? else {
+            return Ok(false);
+        };
+        Ok(self.scope.is_included(path, Some(&volume_mount)))
     }
 }
 
@@ -274,11 +316,11 @@ fn update_index_with_config(config: &UserConfig, changes: &[PathChange]) -> Vec<
     }
 }
 
-/// Resolve `path` against the current directory and return it as the string the index stores.
+/// Resolve `path` against the current directory and return it as a valid UTF-8 index key.
 fn absolute_path_string(path: &Path) -> Result<String> {
     let absolute: PathBuf = std::path::absolute(path)
         .with_context(|| format!("Failed to resolve the absolute path of {}", path.display()))?;
-    Ok(absolute.to_string_lossy().to_string())
+    Ok(path_to_utf8(&absolute)?.to_string())
 }
 
 /// Translate `destination` into the most specific unambiguous stored root spelling.
@@ -398,21 +440,7 @@ fn join_stored_root(stored_root: &str, relative: &Path) -> String {
 ///
 /// Windows paths compare case-insensitively and accept either separator.
 fn is_within_root(path: &str, root: &str) -> bool {
-    let normalize = |value: &str| {
-        if cfg!(windows) {
-            value.replace('/', "\\").to_lowercase()
-        } else {
-            value.to_string()
-        }
-    };
-    let separator = if cfg!(windows) { '\\' } else { '/' };
-    let path = normalize(path);
-    let root = normalize(root);
-    let root = root.trim_end_matches(separator);
-    if root.is_empty() {
-        return path.starts_with(separator);
-    }
-    path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with(separator))
+    is_path_within_root(path, root)
 }
 
 #[cfg(test)]
@@ -1086,5 +1114,163 @@ mod test_aliased_index_roots {
         assert_eq!((report.moved, report.removed, report.not_indexed), (0, 2, 2));
         assert_eq!(index.indexed_relative(), vec!["kept.txt"]);
         let _keep_temp = &index.temp;
+    }
+}
+
+#[cfg(test)]
+mod test_shared_scope_and_volumes {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::types::{FileEntry, IndexedVolume, VolumeType};
+
+    #[test]
+    fn cross_volume_directory_move_updates_volume_id_and_handles_missing_parent() {
+        let temp = TempDir::new().unwrap();
+        let root_a = temp.path().join("root_a");
+        let root_b = temp.path().join("root_b");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+
+        let mut config = UserConfig::default();
+        config.daemon.database_path = Some(temp.path().join("filefind.db"));
+        config.daemon.paths = vec![
+            root_a.to_string_lossy().into_owned(),
+            root_b.to_string_lossy().into_owned(),
+        ];
+
+        let database = Database::open(&config.database_path()).unwrap();
+        let volume_a = database
+            .upsert_volume(&IndexedVolume::new(
+                "VOL-A".into(),
+                root_a.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        let volume_b = database
+            .upsert_volume(&IndexedVolume::new(
+                "VOL-B".into(),
+                root_b.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+
+        // Only the child is indexed.
+        // The moved parent directory row itself is absent.
+        let child_old = root_a.join("pack").join("episode.mkv");
+        let child_new = root_b.join("pack").join("episode.mkv");
+        database
+            .insert_file(&FileEntry {
+                id: None,
+                volume_id: volume_a,
+                parent_id: None,
+                name: "episode.mkv".into(),
+                full_path: child_old.to_string_lossy().into_owned(),
+                is_directory: false,
+                size: 12,
+                created_time: None,
+                modified_time: None,
+                mft_reference: Some(99),
+            })
+            .unwrap();
+
+        let updater = IndexUpdater::open_with_config(&config).unwrap().unwrap();
+        let changes = [PathChange::moved_directory(root_a.join("pack"), root_b.join("pack"))];
+        let report = updater.apply(&changes);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.moved, 1);
+
+        let moved = database
+            .get_file_by_path(&child_new.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.volume_id, volume_b);
+        assert_eq!(moved.mft_reference, None);
+        assert!(
+            database
+                .get_file_by_path(&child_old.to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+
+        // Replay after daemon or prior run already applied the move is a no-op.
+        let replay = updater.apply(&changes);
+        assert_eq!((replay.moved, replay.removed, replay.not_indexed), (0, 0, 1));
+    }
+
+    #[test]
+    fn move_into_excluded_pattern_or_hidden_file_removes_entry_from_index() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("library");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut config = UserConfig::default();
+        config.daemon.database_path = Some(temp.path().join("filefind.db"));
+        config.daemon.paths = vec![root.to_string_lossy().into_owned()];
+        config.daemon.exclude = vec!["ignored_dir".into()];
+        config.daemon.exclude_patterns = vec!["*.tmp".into()];
+
+        let database = Database::open(&config.database_path()).unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new(
+                "EXCL-VOL".into(),
+                root.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let full_path = root.join(name);
+            database
+                .insert_file(&FileEntry::new(
+                    volume_id,
+                    name.into(),
+                    full_path.to_string_lossy().into_owned(),
+                    false,
+                ))
+                .unwrap();
+        }
+
+        let updater = IndexUpdater::open_with_config(&config).unwrap().unwrap();
+        let report = updater.apply(&[
+            PathChange::moved_file(root.join("a.txt"), root.join("a.tmp")),
+            PathChange::moved_file(root.join("b.txt"), root.join(".hidden.txt")),
+            PathChange::moved_file(root.join("c.txt"), root.join("ignored_dir").join("c.txt")),
+        ]);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!((report.moved, report.removed), (0, 3));
+        assert!(database.search_by_path("", 100).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_and_reports_non_utf8_paths_without_lossy_keys() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut config = UserConfig::default();
+        config.daemon.database_path = Some(temp.path().join("filefind.db"));
+        let database = Database::open(&config.database_path()).unwrap();
+        database
+            .upsert_volume(&IndexedVolume::new(
+                "UTF8-VOL".into(),
+                root.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+
+        let bad_path = root.join(OsStr::from_bytes(b"bad-\xff.txt"));
+        let updater = IndexUpdater::open_with_config(&config).unwrap().unwrap();
+        let report = updater.apply(&[PathChange::removed_file(bad_path)]);
+
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("UTF-8"));
     }
 }

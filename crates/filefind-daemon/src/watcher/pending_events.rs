@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Event, EventKind};
 
+use filefind_common::IndexScope;
+use filefind_common::scope::path_to_utf8;
 use filefind_common::types::FileChangeEvent;
-
-use super::matches_exclude_patterns;
+use tracing::warn;
 
 /// Changes waiting for their debounce period, keyed by the path they apply to.
 #[derive(Debug, Default)]
@@ -33,9 +34,15 @@ impl PendingEvents {
         Self::default()
     }
 
-    /// Merge one `notify` event into the pending changes, skipping excluded paths.
-    pub(super) fn ingest(&mut self, event: Event, exclude_patterns: &[String], now: Instant) {
-        let is_excluded = |path: &PathBuf| matches_exclude_patterns(&path.to_string_lossy(), exclude_patterns);
+    /// Merge one `notify` event into the pending changes, skipping excluded or non-UTF-8 paths.
+    pub(super) fn ingest_with_scope(&mut self, event: Event, scope: &IndexScope, now: Instant) {
+        let is_excluded = |path: &PathBuf| {
+            let Ok(path_str) = path_to_utf8(path) else {
+                warn!("Skipping non-UTF-8 watcher path: {}", path.display());
+                return true;
+            };
+            scope.is_excluded(path_str, scope.most_specific_root(path_str))
+        };
 
         match event.kind {
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
@@ -99,6 +106,13 @@ impl PendingEvents {
         }
     }
 
+    /// Test helper that ingests an event using only directory exclusion rules.
+    #[cfg(test)]
+    pub(super) fn ingest(&mut self, event: Event, exclude_patterns: &[String], now: Instant) {
+        let scope = IndexScope::new(Vec::new(), exclude_patterns.to_vec(), Vec::new());
+        self.ingest_with_scope(event, &scope, now);
+    }
+
     /// Remove and return the changes that have waited at least `debounce`.
     ///
     /// A rename whose new name never arrived within the debounce period becomes a delete of the old name.
@@ -148,18 +162,20 @@ impl PendingEvents {
         self.changes.insert(to, (change, now));
     }
 
-    /// Record a change for `path`, keeping a pending create or rename when the file is only modified afterwards.
+    /// Record a change for `path`, keeping a pending create, rename, or delete when a stale modify arrives afterwards.
     fn insert(&mut self, path: PathBuf, change: FileChangeEvent, now: Instant) {
         self.changes
             .entry(path)
             .and_modify(|(existing, _seen)| {
-                let keeps_existing = matches!(
-                    (&*existing, &change),
-                    (
-                        FileChangeEvent::Created(_) | FileChangeEvent::Renamed { .. },
-                        FileChangeEvent::Modified(_)
-                    )
-                );
+                let keeps_existing = match (&*existing, &change) {
+                    (FileChangeEvent::Created(_) | FileChangeEvent::Renamed { .. }, FileChangeEvent::Modified(_)) => {
+                        true
+                    }
+                    (FileChangeEvent::Deleted(_), FileChangeEvent::Modified(modified_path)) => {
+                        std::fs::symlink_metadata(modified_path).is_err()
+                    }
+                    _ => false,
+                };
                 if !keeps_existing {
                     *existing = change.clone();
                 }

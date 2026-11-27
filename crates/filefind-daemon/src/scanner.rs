@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use cli_tools_common::format_number;
+use filefind_common::IndexScope;
 use filefind_common::types::{IndexedVolume, VolumeType};
 use filefind_common::{
     Config, Database, FileEntry, PathType, classify_path, extract_drive_letter, get_persistent_drive_mapping,
@@ -33,7 +34,7 @@ use tracing::{debug, error, info, warn};
 use crate::mft::{MftScanner, detect_ntfs_volumes};
 use crate::pruner::prune_multiple_volumes;
 use crate::usn::{UsnChange, UsnMonitor};
-use crate::watcher::{matches_exclude_patterns, scan_directory};
+use crate::watcher::scan_directory_with_scope;
 
 /// Categorized paths for scanning.
 struct CategorizedPaths {
@@ -135,7 +136,7 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
     let path_type = classify_path(scan_path);
     debug!("Detected path type: {}", path_type);
 
-    let exclude_patterns = &config.daemon.exclude;
+    let scope = IndexScope::from_daemon_config(&config.daemon);
 
     let count = match path_type {
         PathType::NtfsDriveRoot => {
@@ -143,7 +144,7 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
             let drive_letter = extract_drive_letter(scan_path).expect("NtfsDriveRoot should have a drive letter");
 
             debug!("Using MFT scanner for NTFS drive root");
-            try_mft_with_fallback(database, drive_letter, &[], scan_path, exclude_patterns, clean_scan).await?
+            try_mft_with_fallback(database, drive_letter, &[], scan_path, &scope, clean_scan).await?
         }
         PathType::LocalDirectory => {
             // Use MFT scanner with path filter for local directories.
@@ -151,18 +152,10 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
             if let Some(drive_letter) = extract_drive_letter(scan_path) {
                 let path_filter = scan_path.to_string_lossy().into_owned();
                 debug!("Using MFT scanner with path filter: {}", path_filter);
-                try_mft_with_fallback(
-                    database,
-                    drive_letter,
-                    &[path_filter],
-                    scan_path,
-                    exclude_patterns,
-                    clean_scan,
-                )
-                .await?
+                try_mft_with_fallback(database, drive_letter, &[path_filter], scan_path, &scope, clean_scan).await?
             } else {
                 debug!("Using directory scanner for local directory without drive letter");
-                scan_directory_to_db(database, scan_path, exclude_patterns, clean_scan).await?
+                scan_directory_to_db_with_scope(database, scan_path, &scope, clean_scan).await?
             }
         }
         PathType::MappedNetworkDrive => {
@@ -170,12 +163,12 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
             let drive_letter = extract_drive_letter(scan_path).expect("MappedNetworkDrive should have a drive letter");
 
             debug!("Attempting MFT scanner for mapped network drive");
-            try_mft_with_fallback(database, drive_letter, &[], scan_path, exclude_patterns, clean_scan).await?
+            try_mft_with_fallback(database, drive_letter, &[], scan_path, &scope, clean_scan).await?
         }
         PathType::UncPath => {
             // Use directory scanner for UNC paths (no drive letter for MFT)
             debug!("Using directory scanner for UNC path");
-            scan_directory_to_db(database, scan_path, exclude_patterns, clean_scan).await?
+            scan_directory_to_db_with_scope(database, scan_path, &scope, clean_scan).await?
         }
     };
 
@@ -209,7 +202,7 @@ pub async fn scan_configured_paths(database: &mut Database, config: &Config) -> 
         info!("Scanning {} paths...", total_tasks);
     }
 
-    let exclude_patterns: Arc<[String]> = config.daemon.exclude.clone().into();
+    let scope = Arc::new(IndexScope::from_daemon_config(&config.daemon));
 
     // Track which volumes need pruning (non-NTFS volumes in incremental mode)
     let mut non_ntfs_volume_ids: Vec<i64> = Vec::new();
@@ -219,34 +212,34 @@ pub async fn scan_configured_paths(database: &mut Database, config: &Config) -> 
 
     // NTFS drive roots (blocking, no fallback needed)
     for drive_letter in categorized.ntfs_drive_roots {
-        let exclude = Arc::clone(&exclude_patterns);
+        let scope = Arc::clone(&scope);
         tasks.push(tokio::task::spawn_blocking(move || {
-            vec![scan_ntfs_drive(drive_letter, &exclude)]
+            vec![scan_ntfs_drive(drive_letter, &scope)]
         }));
     }
 
     // Local directories (MFT with filtering, fallback to directory walk)
     for (drive_letter, paths) in categorized.local_paths_by_drive {
-        let exclude = Arc::clone(&exclude_patterns);
+        let scope = Arc::clone(&scope);
         tasks.push(tokio::spawn(async move {
-            scan_local_directories(drive_letter, paths, exclude).await
+            scan_local_directories(drive_letter, paths, scope).await
         }));
     }
 
     // Mapped network drives (try MFT, fallback to directory walk)
     for (drive_letter, scan_path) in categorized.mapped_network_drives {
-        let exclude = Arc::clone(&exclude_patterns);
+        let scope = Arc::clone(&scope);
         tasks.push(tokio::spawn(async move {
-            vec![scan_mapped_drive(drive_letter, scan_path, exclude).await]
+            vec![scan_mapped_drive(drive_letter, scan_path, scope).await]
         }));
     }
 
     // UNC paths and plain directories without a drive letter (directory walk only)
     for scan_path in categorized.unc_paths.into_iter().chain(categorized.plain_directories) {
         let label = scan_path.to_string_lossy().into_owned();
-        let exclude = Arc::clone(&exclude_patterns);
+        let scope = Arc::clone(&scope);
         tasks.push(tokio::spawn(async move {
-            vec![scan_path_directory(scan_path, label, exclude).await]
+            vec![scan_path_directory(scan_path, label, scope).await]
         }));
     }
 
@@ -373,16 +366,32 @@ pub fn scan_ntfs_volume_filtered(
 /// * `path` - Directory path to scan
 /// * `exclude_patterns` - Patterns to exclude from scanning
 /// * `clean_scan` - If true, deletes existing entries before inserting new ones
+#[cfg(test)]
 pub async fn scan_directory_to_db(
     database: &mut Database,
     path: &Path,
     exclude_patterns: &[String],
     clean_scan: bool,
 ) -> Result<usize> {
+    let scope = IndexScope::new(
+        vec![path.to_string_lossy().into_owned()],
+        exclude_patterns.to_vec(),
+        Vec::new(),
+    );
+    scan_directory_to_db_with_scope(database, path, &scope, clean_scan).await
+}
+
+/// Scan a directory using the shared [`IndexScope`] and store entries in the database.
+async fn scan_directory_to_db_with_scope(
+    database: &mut Database,
+    path: &Path,
+    scope: &IndexScope,
+    clean_scan: bool,
+) -> Result<usize> {
     let volume_info = create_directory_volume_info(path);
     let volume_id = database.upsert_volume(&volume_info)?;
 
-    let scan_entries = scan_directory(path, exclude_patterns).await?;
+    let scan_entries = scan_directory_with_scope(path, scope).await?;
 
     // Delete existing entries for this volume if doing a clean scan
     if clean_scan {
@@ -434,7 +443,7 @@ fn report_scan_completion(total_entries: usize, failed_paths: usize, started: In
     Ok(())
 }
 
-async fn scan_local_directories(drive_letter: char, paths: Vec<String>, exclude: Arc<[String]>) -> Vec<ScanResult> {
+async fn scan_local_directories(drive_letter: char, paths: Vec<String>, scope: Arc<IndexScope>) -> Vec<ScanResult> {
     let label = format!("{drive_letter}:");
     let start = Instant::now();
 
@@ -443,7 +452,7 @@ async fn scan_local_directories(drive_letter: char, paths: Vec<String>, exclude:
         Ok((volume_info, entries, current_usn)) => vec![ScanResult::Success {
             label,
             volume_info,
-            entries: filter_excluded_entries(entries, &exclude),
+            entries: filter_excluded_entries(entries, &scope),
             elapsed: start.elapsed(),
             current_usn,
         }],
@@ -457,14 +466,21 @@ async fn scan_local_directories(drive_letter: char, paths: Vec<String>, exclude:
             let mut results = Vec::with_capacity(paths.len());
             for path_str in paths {
                 let scan_path = PathBuf::from(&path_str);
-                results.push(match scan_directory(&scan_path, &exclude).await {
-                    Ok(scan_entries) => ScanResult::Success {
-                        label: path_str,
-                        volume_info: create_directory_volume_info(&scan_path),
-                        entries: scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect(),
-                        elapsed: start.elapsed(),
-                        current_usn: None,
-                    },
+                results.push(match scan_directory_with_scope(&scan_path, &scope).await {
+                    Ok(scan_entries) => {
+                        let entries = filter_entries_owned_by_root(
+                            scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect(),
+                            &path_str,
+                            &scope,
+                        );
+                        ScanResult::Success {
+                            label: path_str,
+                            volume_info: create_directory_volume_info(&scan_path),
+                            entries,
+                            elapsed: start.elapsed(),
+                            current_usn: None,
+                        }
+                    }
                     Err(error) => ScanResult::Failed {
                         label: path_str,
                         error: error.to_string(),
@@ -477,7 +493,7 @@ async fn scan_local_directories(drive_letter: char, paths: Vec<String>, exclude:
 }
 
 /// Scan a mapped network drive using MFT, fallback to directory walking.
-async fn scan_mapped_drive(drive_letter: char, scan_path: PathBuf, exclude: Arc<[String]>) -> ScanResult {
+async fn scan_mapped_drive(drive_letter: char, scan_path: PathBuf, scope: Arc<IndexScope>) -> ScanResult {
     let label = scan_path.to_string_lossy().into_owned();
     let start = Instant::now();
 
@@ -486,7 +502,7 @@ async fn scan_mapped_drive(drive_letter: char, scan_path: PathBuf, exclude: Arc<
         Ok((volume_info, entries, current_usn)) => ScanResult::Success {
             label,
             volume_info,
-            entries: filter_excluded_entries(entries, &exclude),
+            entries: filter_excluded_entries(entries, &scope),
             elapsed: start.elapsed(),
             current_usn,
         },
@@ -497,11 +513,14 @@ async fn scan_mapped_drive(drive_letter: char, scan_path: PathBuf, exclude: Arc<
                 label, mft_error
             );
 
-            match scan_directory(&scan_path, &exclude).await {
+            match scan_directory_with_scope(&scan_path, &scope).await {
                 Ok(scan_entries) => {
                     let volume_info = create_directory_volume_info(&scan_path);
-                    let entries: Vec<FileEntry> =
-                        scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect();
+                    let entries = filter_entries_owned_by_root(
+                        scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect(),
+                        &volume_info.mount_point,
+                        &scope,
+                    );
                     ScanResult::Success {
                         label,
                         volume_info,
@@ -525,7 +544,7 @@ async fn try_mft_with_fallback(
     drive_letter: char,
     path_filters: &[String],
     scan_path: &Path,
-    exclude_patterns: &[String],
+    scope: &IndexScope,
     clean_scan: bool,
 ) -> Result<usize> {
     let mft_result = if path_filters.is_empty() {
@@ -538,18 +557,22 @@ async fn try_mft_with_fallback(
         Ok(count) => Ok(count),
         Err(err) => {
             debug!("MFT scan failed: {}, falling back to directory scan", err);
-            scan_directory_to_db(database, scan_path, exclude_patterns, clean_scan).await
+            scan_directory_to_db_with_scope(database, scan_path, scope, clean_scan).await
         }
     }
 }
 
 /// Scan a path using directory walking.
-async fn scan_path_directory(scan_path: PathBuf, label: String, exclude: Arc<[String]>) -> ScanResult {
+async fn scan_path_directory(scan_path: PathBuf, label: String, scope: Arc<IndexScope>) -> ScanResult {
     let start = Instant::now();
-    match scan_directory(&scan_path, &exclude).await {
+    match scan_directory_with_scope(&scan_path, &scope).await {
         Ok(scan_entries) => {
             let volume_info = create_directory_volume_info(&scan_path);
-            let entries: Vec<FileEntry> = scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect();
+            let entries = filter_entries_owned_by_root(
+                scan_entries.into_iter().map(|entry| entry.into_file_entry(0)).collect(),
+                &volume_info.mount_point,
+                &scope,
+            );
             ScanResult::Success {
                 label,
                 volume_info,
@@ -760,14 +783,14 @@ fn log_inaccessible_scan_path(path: &Path) {
 }
 
 /// Scan an NTFS drive root (full drive, no filtering).
-fn scan_ntfs_drive(drive_letter: char, exclude: &[String]) -> ScanResult {
+fn scan_ntfs_drive(drive_letter: char, scope: &IndexScope) -> ScanResult {
     let label = format!("{drive_letter}:");
     let start = Instant::now();
     match scan_ntfs_volume_sync(drive_letter, &[]) {
         Ok((volume_info, entries, current_usn)) => ScanResult::Success {
             label,
             volume_info,
-            entries: filter_excluded_entries(entries, exclude),
+            entries: filter_excluded_entries(entries, scope),
             elapsed: start.elapsed(),
             current_usn,
         },
@@ -778,10 +801,26 @@ fn scan_ntfs_drive(drive_letter: char, exclude: &[String]) -> ScanResult {
     }
 }
 
-fn filter_excluded_entries(entries: Vec<FileEntry>, exclude: &[String]) -> Vec<FileEntry> {
+/// Keep only entries not excluded by the shared [`IndexScope`].
+fn filter_excluded_entries(entries: Vec<FileEntry>, scope: &IndexScope) -> Vec<FileEntry> {
     entries
         .into_iter()
-        .filter(|entry| !matches_exclude_patterns(&entry.full_path, exclude))
+        .filter(|entry| !scope.is_excluded(&entry.full_path, scope.most_specific_root(&entry.full_path)))
+        .collect()
+}
+
+/// Keep only entries owned by `root`, preventing parallel scans of overlapping roots from racing on `volume_id`.
+fn filter_entries_owned_by_root(entries: Vec<FileEntry>, root: &str, scope: &IndexScope) -> Vec<FileEntry> {
+    if scope.roots.len() <= 1 {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| {
+            scope
+                .most_specific_root(&entry.full_path)
+                .is_none_or(|owner| owner == root)
+        })
         .collect()
 }
 
@@ -997,7 +1036,8 @@ mod tests {
         .into_iter()
         .map(|path| FileEntry::new(1, "file".into(), path.into(), false))
         .collect();
-        let filtered = filter_excluded_entries(entries, &["*.tmp".into(), "Cache".into()]);
+        let scope = IndexScope::new(Vec::new(), vec!["Cache".into()], vec!["*.tmp".into()]);
+        let filtered = filter_excluded_entries(entries, &scope);
 
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].full_path, "C:\\Docs\\keep.txt");
@@ -1010,7 +1050,7 @@ mod tests {
         let valid_path = temp.path().to_string_lossy().into_owned();
         let missing_path = temp.path().join("missing").to_string_lossy().into_owned();
 
-        let result = scan_local_directories('?', vec![valid_path, missing_path], Arc::from([])).await;
+        let result = scan_local_directories('?', vec![valid_path, missing_path], Arc::new(IndexScope::default())).await;
 
         assert_eq!(result.len(), 2);
         assert!(matches!(result[0], ScanResult::Success { .. }));
@@ -2088,9 +2128,9 @@ mod tests {
         fs::write(scan_dir.join("image.png"), "fake png").expect("Failed to write image.png");
 
         let label = scan_dir.to_string_lossy().into_owned();
-        let exclude: Arc<[String]> = Arc::from(Vec::<String>::new().into_boxed_slice());
+        let scope = Arc::new(IndexScope::default());
 
-        let result = scan_path_directory(scan_dir.clone(), label.clone(), exclude).await;
+        let result = scan_path_directory(scan_dir.clone(), label.clone(), scope).await;
         match result {
             ScanResult::Success {
                 label: result_label,
@@ -2118,9 +2158,9 @@ mod tests {
         fs::write(scan_dir.join("skip.bak"), "skip").expect("Failed to write skip.bak");
 
         let label = scan_dir.to_string_lossy().into_owned();
-        let exclude: Arc<[String]> = Arc::from(vec!["*.bak".to_string()].into_boxed_slice());
+        let scope = Arc::new(IndexScope::new(Vec::new(), Vec::new(), vec!["*.bak".to_string()]));
 
-        let result = scan_path_directory(scan_dir, label, exclude).await;
+        let result = scan_path_directory(scan_dir, label, scope).await;
         match result {
             ScanResult::Success { entries, .. } => {
                 // scan_dir + keep.txt = 2 entries (skip.bak excluded)
@@ -2138,9 +2178,9 @@ mod tests {
         let temp = tempdir().expect("Failed to create temp directory");
         let path = temp.path().join("missing_directory_for_testing");
         let label = path.to_string_lossy().into_owned();
-        let exclude: Arc<[String]> = Arc::from(Vec::<String>::new().into_boxed_slice());
+        let scope = Arc::new(IndexScope::default());
 
-        let result = scan_path_directory(path, label, exclude).await;
+        let result = scan_path_directory(path, label, scope).await;
         match result {
             ScanResult::Failed { label, error } => {
                 assert!(!label.is_empty(), "Label should be preserved in failed result");
@@ -2164,9 +2204,9 @@ mod tests {
         fs::create_dir(&scan_dir).expect("Failed to create scan directory");
 
         let label = scan_dir.to_string_lossy().into_owned();
-        let exclude: Arc<[String]> = Arc::from(Vec::<String>::new().into_boxed_slice());
+        let scope = Arc::new(IndexScope::default());
 
-        let result = scan_path_directory(scan_dir, label, exclude).await;
+        let result = scan_path_directory(scan_dir, label, scope).await;
         match result {
             ScanResult::Success { entries, .. } => {
                 // Just the root directory

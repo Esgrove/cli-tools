@@ -15,6 +15,10 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use filefind_common::IndexScope;
+#[cfg(test)]
+use filefind_common::scope::matches_exclude_rules;
+use filefind_common::scope::path_to_utf8;
 use filefind_common::types::FileChangeEvent;
 use filefind_common::{extract_drive_letter, get_persistent_drive_mapping, is_unc_path, normalize_drive_root};
 
@@ -36,6 +40,9 @@ pub struct FileWatcher {
 
     /// Patterns to exclude from watching.
     exclude_patterns: Vec<String>,
+
+    /// Filename glob patterns to exclude from watching.
+    exclude_globs: Vec<String>,
 
     /// Debounce duration in milliseconds.
     debounce_ms: u64,
@@ -74,11 +81,24 @@ pub struct ScanEntry {
 
 impl FileWatcher {
     /// Create a new file watcher.
+    #[cfg(test)]
     #[must_use]
     pub fn new(paths: Vec<PathBuf>, exclude_patterns: Vec<String>, debounce_ms: u64, recursive: bool) -> Self {
+        Self::with_scope(
+            paths,
+            IndexScope::new(Vec::new(), exclude_patterns, Vec::new()),
+            debounce_ms,
+            recursive,
+        )
+    }
+
+    /// Create a new file watcher with the full shared [`IndexScope`].
+    #[must_use]
+    pub fn with_scope(paths: Vec<PathBuf>, scope: IndexScope, debounce_ms: u64, recursive: bool) -> Self {
         Self {
             watched_paths: paths.into_iter().map(|path| normalize_drive_root(&path)).collect(),
-            exclude_patterns,
+            exclude_patterns: scope.exclude,
+            exclude_globs: scope.exclude_patterns,
             debounce_ms,
             recursive,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -93,6 +113,7 @@ impl FileWatcher {
         Self {
             watched_paths: vec![path],
             exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -119,7 +140,9 @@ impl FileWatcher {
     /// Check if a path should be excluded based on the exclusion patterns.
     #[cfg(test)]
     fn should_exclude(&self, path: &Path) -> bool {
-        matches_exclude_patterns(&path.to_string_lossy(), &self.exclude_patterns)
+        let path_str = path.to_string_lossy();
+        matches_exclude_rules(&path_str, &self.exclude_patterns)
+            || filefind_common::scope::matches_exclude_globs(&path_str, &self.exclude_globs)
     }
 
     /// Start watching for file changes with debouncing.
@@ -132,7 +155,11 @@ impl FileWatcher {
         let (event_tx, event_rx) = mpsc::channel(1000);
         let shutdown = self.shutdown.clone();
         let watched_paths = self.watched_paths.clone();
-        let exclude_patterns = self.exclude_patterns.clone();
+        let watched_roots: Vec<String> = watched_paths
+            .iter()
+            .filter_map(|path| path.to_str().map(ToString::to_string))
+            .collect();
+        let scope = IndexScope::new(watched_roots, self.exclude_patterns.clone(), self.exclude_globs.clone());
         let debounce_ms = self.debounce_ms;
         let recursive = self.recursive;
 
@@ -181,7 +208,7 @@ impl FileWatcher {
                 let poll_interval = Duration::from_millis((debounce_ms / 2).clamp(50, 1000));
                 match tokio::time::timeout(poll_interval, notify_rx.recv()).await {
                     Ok(Some(event)) => {
-                        pending_events.ingest(event, &exclude_patterns, std::time::Instant::now());
+                        pending_events.ingest_with_scope(event, &scope, std::time::Instant::now());
                     }
                     Ok(None) => break,
                     Err(_) => { /* Timeout – check for events to flush */ }
@@ -308,6 +335,7 @@ impl Default for FileWatcher {
         Self {
             watched_paths: Vec::new(),
             exclude_patterns: Vec::new(),
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -343,28 +371,35 @@ impl ScanEntry {
 ///
 /// This walks the directory tree and returns all files and directories found.
 /// Uses parallel scanning with tokio for better performance.
+#[cfg(test)]
 pub async fn scan_directory(root: &Path, exclude_patterns: &[String]) -> Result<Vec<ScanEntry>> {
-    scan_directory_with_concurrency(root, exclude_patterns, DEFAULT_SCAN_CONCURRENCY).await
+    let scope = IndexScope::new(
+        vec![root.to_string_lossy().into_owned()],
+        exclude_patterns.to_vec(),
+        Vec::new(),
+    );
+    scan_directory_with_scope_and_concurrency(root, &scope, DEFAULT_SCAN_CONCURRENCY).await
 }
 
-/// Perform an initial directory scan with configurable concurrency.
-///
-/// # Arguments
-/// * `root` - Root directory to scan
-/// * `exclude_patterns` - Patterns to exclude from scanning
-/// * `max_concurrency` - Maximum number of concurrent directory scan tasks
-pub async fn scan_directory_with_concurrency(
+/// Perform an initial directory scan using the shared [`IndexScope`].
+pub async fn scan_directory_with_scope(root: &Path, scope: &IndexScope) -> Result<Vec<ScanEntry>> {
+    scan_directory_with_scope_and_concurrency(root, scope, DEFAULT_SCAN_CONCURRENCY).await
+}
+
+/// Perform an initial directory scan with the shared [`IndexScope`] and configurable concurrency.
+async fn scan_directory_with_scope_and_concurrency(
     root: &Path,
-    exclude_patterns: &[String],
+    scope: &IndexScope,
     max_concurrency: usize,
 ) -> Result<Vec<ScanEntry>> {
     debug!("{} Starting file scan", root.display());
 
     let root = normalize_drive_root(root);
+    let root_str: Arc<str> = Arc::from(path_to_utf8(&root)?);
     let _root_directory = tokio::fs::read_dir(&root)
         .await
         .with_context(|| format!("Cannot scan directory root {}", root.display()))?;
-    let exclude_patterns: Arc<[String]> = exclude_patterns.to_vec().into();
+    let scope = Arc::new(scope.clone());
     let entries: Arc<tokio::sync::Mutex<Vec<ScanEntry>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
 
@@ -372,10 +407,9 @@ pub async fn scan_directory_with_concurrency(
     if let Ok(metadata) = tokio::fs::metadata(&root).await {
         let root_entry = ScanEntry {
             path: root.clone(),
-            name: root.file_name().map_or_else(
-                || root.to_string_lossy().into_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            ),
+            name: root
+                .file_name()
+                .map_or_else(|| root_str.to_string(), |name| name.to_string_lossy().into_owned()),
             is_directory: metadata.is_dir(),
             size: 0,
             modified: metadata.modified().ok(),
@@ -395,13 +429,14 @@ pub async fn scan_directory_with_concurrency(
 
         for dir in batch {
             let entries = entries.clone();
-            let exclude_patterns = exclude_patterns.clone();
+            let scope = scope.clone();
+            let root_str = root_str.clone();
             let semaphore = semaphore.clone();
 
             tasks.push(tokio::spawn(async move {
                 // Acquire permit before scanning (limits concurrent I/O)
                 let permit = semaphore.acquire().await.context("Directory scan semaphore closed")?;
-                let result = scan_single_directory(dir, exclude_patterns, entries).await;
+                let result = scan_single_directory(dir, root_str, scope, entries).await;
                 drop(permit);
                 result
             }));
@@ -441,76 +476,16 @@ pub async fn scan_directory_with_concurrency(
 }
 
 /// Check if a path matches any of the exclusion patterns.
-///
-/// Matching is case-insensitive and treats `/` and `\` as equivalent separators.
-///
-/// Supports glob-style patterns:
-/// - `*pattern` - matches paths ending with "pattern"
-/// - `pattern*` - matches paths starting with "pattern"
-/// - `*pattern*` - matches paths containing "pattern"
-/// - `pattern` - matches whole path components, so `Epic` excludes `D:\Games\Epic\...`
-///   but not `D:\Videos\EpicTrailer.mp4`. Multi-component patterns such as `C:\Windows`
-///   or `Vortex Mods\cache` match a contiguous run of components.
-///
-/// # Examples
-///
-/// ```ignore
-/// let patterns = vec!["*.tmp".to_string(), "*node_modules*".to_string()];
-///
-/// // Suffix match: path ends with ".tmp"
-/// assert!(matches_exclude_patterns(r"C:\project\build.tmp", &patterns));
-///
-/// // Contains match: path contains "node_modules"
-/// assert!(matches_exclude_patterns(r"C:\project\node_modules\pkg", &patterns));
-///
-/// // No match
-/// assert!(!matches_exclude_patterns(r"C:\project\src\main.rs", &patterns));
-/// ```
+#[cfg(test)]
 pub fn matches_exclude_patterns(path_str: &str, exclude_patterns: &[String]) -> bool {
-    if exclude_patterns.is_empty() {
-        return false;
-    }
-
-    let normalized_path = normalize_for_exclude_matching(path_str);
-    exclude_patterns
-        .iter()
-        .any(|pattern| matches_exclude_pattern(&normalized_path, pattern))
-}
-
-/// Check a normalized path against a single exclusion pattern.
-fn matches_exclude_pattern(normalized_path: &str, pattern: &str) -> bool {
-    let pattern = normalize_for_exclude_matching(pattern);
-    if pattern.is_empty() {
-        return false;
-    }
-
-    if let Some(rest) = pattern.strip_prefix('*') {
-        // "*pattern*" matches anywhere, "*pattern" matches the end
-        return rest.strip_suffix('*').map_or_else(
-            || normalized_path.ends_with(rest),
-            |inner| normalized_path.contains(inner),
-        );
-    }
-
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return normalized_path.starts_with(prefix);
-    }
-
-    // Wrap both sides in separators so only whole path components can match.
-    let bounded_path = format!("\\{}\\", normalized_path.trim_matches('\\'));
-    let bounded_pattern = format!("\\{}\\", pattern.trim_matches('\\'));
-    bounded_path.contains(&bounded_pattern)
-}
-
-/// Lowercase a path or pattern and unify separators for exclusion matching.
-fn normalize_for_exclude_matching(value: &str) -> String {
-    value.replace('/', "\\").to_lowercase()
+    matches_exclude_rules(path_str, exclude_patterns)
 }
 
 /// Scan a single directory and return its subdirectories.
 async fn scan_single_directory(
     dir: PathBuf,
-    exclude_patterns: Arc<[String]>,
+    root_str: Arc<str>,
+    scope: Arc<IndexScope>,
     entries: Arc<tokio::sync::Mutex<Vec<ScanEntry>>>,
 ) -> Result<Vec<PathBuf>> {
     let mut read_dir = tokio::fs::read_dir(&dir)
@@ -526,15 +501,16 @@ async fn scan_single_directory(
         .with_context(|| format!("Error listing {}", dir.display()))?
     {
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        // Skip hidden files/directories
-        if name.starts_with('.') && !name.starts_with(".tmp") {
+        let Ok(path_str) = path_to_utf8(&path) else {
+            warn!("Skipping non-UTF-8 path during scan: {}", path.display());
             continue;
-        }
+        };
+        let Some(name) = entry.file_name().to_str().map(ToString::to_string) else {
+            warn!("Skipping non-UTF-8 entry name during scan: {}", path.display());
+            continue;
+        };
 
-        // Check exclusion patterns
-        if matches_exclude_patterns(&path.to_string_lossy(), &exclude_patterns) {
+        if scope.is_excluded(path_str, Some(&root_str)) {
             continue;
         }
 
@@ -614,7 +590,11 @@ mod tests {
         let missing = temp.path().join("missing");
         let entries = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-        assert!(scan_single_directory(missing, Arc::from([]), entries).await.is_err());
+        assert!(
+            scan_single_directory(missing, Arc::from(""), Arc::new(IndexScope::default()), entries)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -626,6 +606,7 @@ mod tests {
                 "*\\node_modules\\*".to_string(),
                 "Thumbs.db".to_string(),
             ],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -644,6 +625,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec!["*.bak".to_string(), "*.tmp".to_string()],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -666,6 +648,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec!["*cache*".to_string(), "*node_modules*".to_string()],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -690,6 +673,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec!["Thumbs.db".to_string(), ".git".to_string()],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -711,6 +695,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec![],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -728,6 +713,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec!["*.log".to_string(), "*temp*".to_string(), "secret.txt".to_string()],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -1060,6 +1046,7 @@ mod tests {
         let watcher = FileWatcher {
             watched_paths: vec![],
             exclude_patterns: vec!["*.TMP".to_string(), "README.md".to_string()],
+            exclude_globs: Vec::new(),
             debounce_ms: DEFAULT_DEBOUNCE_MS,
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -1216,11 +1203,14 @@ mod test_watcher_renames {
 
     use super::*;
 
-    /// Collect debounced changes until `expected` of them arrived or the deadline passed.
-    async fn collect_changes(receiver: &mut mpsc::Receiver<FileChangeEvent>, expected: usize) -> Vec<FileChangeEvent> {
+    /// Collect debounced changes until `satisfied` returns true or the deadline passes.
+    async fn collect_changes_until(
+        receiver: &mut mpsc::Receiver<FileChangeEvent>,
+        satisfied: impl Fn(&[FileChangeEvent]) -> bool,
+    ) -> Vec<FileChangeEvent> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut changes = Vec::new();
-        while changes.len() < expected && Instant::now() < deadline {
+        while !satisfied(&changes) && Instant::now() < deadline {
             if let Ok(Some(change)) = tokio::time::timeout(Duration::from_millis(200), receiver.recv()).await {
                 changes.push(change);
             }
@@ -1237,34 +1227,37 @@ mod test_watcher_renames {
         std::fs::write(root.join("old dir").join("inside.txt"), "inside").unwrap();
         let watcher = FileWatcher::new(vec![root.clone()], Vec::new(), 100, true);
         let (mut receiver, _shutdown) = watcher.start().unwrap();
-        // Give the platform watcher a moment to arm before changing anything.
+        // Give the platform watcher a moment to arm and drain any setup events.
         tokio::time::sleep(Duration::from_millis(500)).await;
+        while receiver.try_recv().is_ok() {}
 
         std::fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
         std::fs::rename(root.join("old dir"), root.join("new dir")).unwrap();
 
-        let changes = collect_changes(&mut receiver, 2).await;
-        watcher.stop();
-        let described: Vec<String> = changes.iter().map(ToString::to_string).collect();
-        let renamed = |from: &str, to: &str| {
-            changes.iter().any(|change| {
+        let observed = |changes: &[FileChangeEvent], from: &str, to: &str| {
+            let paired = changes.iter().any(|change| {
                 matches!(change, FileChangeEvent::Renamed { from: old, to: new }
                     if old == &root.join(from) && new == &root.join(to))
-            })
-        };
-        let created_and_deleted = |from: &str, to: &str| {
-            changes
-                .iter()
-                .any(|change| matches!(change, FileChangeEvent::Created(path) if path == &root.join(to)))
+            });
+            let split_on_macos = cfg!(target_os = "macos")
                 && changes
                     .iter()
-                    .any(|change| matches!(change, FileChangeEvent::Deleted(path) if path == &root.join(from)))
+                    .any(|change| matches!(change, FileChangeEvent::Created(path) if path == &root.join(to)))
+                && changes
+                    .iter()
+                    .any(|change| matches!(change, FileChangeEvent::Deleted(path) if path == &root.join(from)));
+            paired || split_on_macos
         };
-        // macOS reports both sides of a rename without saying which is which,
-        // so each side becomes a create or a delete there.
+
+        let changes = collect_changes_until(&mut receiver, |changes| {
+            observed(changes, "old.txt", "new.txt") && observed(changes, "old dir", "new dir")
+        })
+        .await;
+        watcher.stop();
+        let described: Vec<String> = changes.iter().map(ToString::to_string).collect();
         for (from, to) in [("old.txt", "new.txt"), ("old dir", "new dir")] {
             assert!(
-                renamed(from, to) || (cfg!(target_os = "macos") && created_and_deleted(from, to)),
+                observed(&changes, from, to),
                 "{from} -> {to} was not reported as a rename: {described:?}"
             );
         }

@@ -23,6 +23,7 @@ pub mod database;
 pub mod index_updates;
 #[cfg(feature = "ipc")]
 pub mod ipc;
+pub mod scope;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod types;
@@ -34,6 +35,7 @@ pub use index_updates::{IndexUpdateReport, IndexUpdater, update_default_index};
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,
 };
+pub use scope::IndexScope;
 pub use types::{FileChangeEvent, FileEntry, IndexedVolume, VolumeType};
 
 /// Project name constant.

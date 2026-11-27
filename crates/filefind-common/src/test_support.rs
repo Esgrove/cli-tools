@@ -54,6 +54,44 @@ impl IndexFixture {
         fixture
     }
 
+    /// Create an index at `database_path` covering multiple roots, each stored as its own volume.
+    ///
+    /// # Panics
+    /// Panics if the database cannot be created or an entry does not exist.
+    #[must_use]
+    pub fn create_with_roots(database_path: &Path, roots: &[(&Path, &[PathBuf])]) -> Self {
+        let primary_root = roots
+            .first()
+            .map_or_else(PathBuf::new, |(root, _)| (*root).to_path_buf());
+        let fixture = Self {
+            database_path: database_path.to_path_buf(),
+            root: primary_root,
+        };
+        let database = Database::open(database_path).expect("the fixture index should be created");
+        for (index, (root, entries)) in roots.iter().enumerate() {
+            let volume_id = database
+                .upsert_volume(&IndexedVolume {
+                    id: None,
+                    serial_number: format!("TEST-FIXTURE-{index}"),
+                    label: None,
+                    mount_point: root.to_string_lossy().to_string(),
+                    volume_type: VolumeType::Local,
+                    is_online: true,
+                    last_scan_time: None,
+                    last_usn: None,
+                })
+                .expect("the fixture volume should be inserted");
+            for entry in *entries {
+                let entry = std::path::absolute(entry).expect("a fixture entry should have an absolute path");
+                let metadata = std::fs::metadata(&entry).expect("an indexed fixture entry should exist");
+                database
+                    .insert_file(&FileEntry::from_metadata(volume_id, &entry, &metadata))
+                    .expect("the fixture entry should be indexed");
+            }
+        }
+        fixture
+    }
+
     /// Environment variables that point a tool at this index and at no filefind config file.
     #[must_use]
     pub fn environment(&self) -> [(&'static str, OsString); 2] {

@@ -202,24 +202,22 @@ impl Database {
     /// # Errors
     /// Returns an error if the volume query fails.
     pub fn get_volume_id_for_path(&self, path: &str) -> Result<Option<i64>> {
-        let normalized = path.replace('/', "\\");
-        Ok(self
+        let volumes = self.get_all_volumes()?;
+        Ok(crate::scope::find_volume_id_for_path(path, &volumes))
+    }
+
+    /// Find the most specific indexed volume ID and mount point containing a path.
+    ///
+    /// # Errors
+    /// Returns an error if the volume query fails.
+    pub fn get_volume_for_path(&self, path: &str) -> Result<Option<(i64, String)>> {
+        let volumes: Vec<(i64, String)> = self
             .get_all_volumes()?
             .into_iter()
-            .filter_map(|volume| {
-                let mount = volume.mount_point.replace('/', "\\");
-                let suffix = normalized.get(mount.len()..)?;
-                let prefix = normalized.get(..mount.len())?;
-                if prefix.eq_ignore_ascii_case(&mount)
-                    && (suffix.is_empty() || mount.ends_with(['\\', ':']) || suffix.starts_with('\\'))
-                {
-                    volume.id.map(|id| (mount.len(), id))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|(length, _)| *length)
-            .map(|(_, id)| id))
+            .filter_map(|volume| volume.id.map(|id| (id, volume.mount_point)))
+            .collect();
+        Ok(crate::scope::find_most_specific_volume(path, &volumes)
+            .map(|(id, mount_point)| (id, mount_point.to_string())))
     }
 
     /// Insert a file entry into the database.
@@ -349,32 +347,57 @@ impl Database {
         Ok(rows_affected)
     }
 
+    /// Return whether any entry is indexed at `path` or strictly beneath it.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn has_entries_under_path(&self, path: &str) -> Result<bool> {
+        let exists: bool = if is_unix_path_key(path) {
+            self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE full_path = ?1 \
+                 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/')",
+                rusqlite::params![path],
+                |row| row.get(0),
+            )
+        } else {
+            let backslash_path = windows_backslash_spelling(path);
+            self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files WHERE full_path IN (?1, ?2) \
+                 OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/') \
+                 OR substr(full_path, 1, length(?2) + 1) IN (?2 || '\\', ?2 || '/'))",
+                rusqlite::params![path, backslash_path],
+                |row| row.get(0),
+            )
+        }
+        .context("Failed to check indexed entries under path")?;
+        Ok(exists)
+    }
+
     /// Delete a directory and all files under it by path prefix.
     ///
     /// This deletes the directory entry itself
     /// and all entries whose path starts with the directory path followed by a path separator.
+    /// Unix paths only treat `/` as a separator so literal backslashes in filenames never match.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn delete_files_under_path(&self, path: &str) -> Result<usize> {
-        // Windows paths are stored with backslashes,
-        // so a path given with forward slashes also matches its backslash spelling.
-        // Unix paths are stored with forward slashes and match as given.
-        // Use Cow to avoid allocation when the path has no forward slashes.
-        let backslash_path: Cow<'_, str> = if path.contains('/') {
-            Cow::Owned(path.replace('/', "\\"))
+        let rows_affected = if is_unix_path_key(path) {
+            self.connection.execute(
+                "DELETE FROM files WHERE full_path = ?1 \
+                 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
+                rusqlite::params![path],
+            )
         } else {
-            Cow::Borrowed(path)
-        };
-        let rows_affected = self
-            .connection
-            .execute(
+            let backslash_path = windows_backslash_spelling(path);
+            self.connection.execute(
                 "DELETE FROM files WHERE full_path IN (?1, ?2) \
                  OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/') \
                  OR substr(full_path, 1, length(?2) + 1) IN (?2 || '\\', ?2 || '/')",
                 rusqlite::params![path, backslash_path],
             )
-            .context("Failed to delete files under path")?;
+        }
+        .context("Failed to delete files under path")?;
 
         debug!("Deleted {} entries under path {}", rows_affected, path);
         Ok(rows_affected)
@@ -386,13 +409,112 @@ impl Database {
     /// Returns an error if the update conflicts with another indexed path.
     pub fn rebase_files_under_path(&self, old_path: &str, new_path: &str, new_name: &str) -> Result<usize> {
         let transaction = self.connection.unchecked_transaction()?;
-        let updated = transaction.execute(
-            "UPDATE files SET full_path = ?2 || substr(full_path, length(?1) + 1), \
-             name = CASE WHEN full_path = ?1 THEN ?3 ELSE name END \
-             WHERE full_path = ?1 OR substr(full_path, 1, length(?1) + 1) = ?1 || '\\' \
-             OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
-            rusqlite::params![old_path, new_path, new_name],
-        )?;
+        let updated = if is_unix_path_key(old_path) {
+            transaction.execute(
+                "UPDATE files SET full_path = ?2 || substr(full_path, length(?1) + 1), \
+                 name = CASE WHEN full_path = ?1 THEN ?3 ELSE name END \
+                 WHERE full_path = ?1 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
+                rusqlite::params![old_path, new_path, new_name],
+            )?
+        } else {
+            transaction.execute(
+                "UPDATE files SET full_path = ?2 || substr(full_path, length(?1) + 1), \
+                 name = CASE WHEN full_path = ?1 THEN ?3 ELSE name END \
+                 WHERE full_path = ?1 OR substr(full_path, 1, length(?1) + 1) = ?1 || '\\' \
+                 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
+                rusqlite::params![old_path, new_path, new_name],
+            )?
+        };
+        transaction.commit()?;
+        Ok(updated)
+    }
+
+    /// Replace stale destination entries, rebase a directory subtree, and update volume ownership in one transaction.
+    ///
+    /// Handles subtrees even when the parent directory row itself was not indexed.
+    /// Preserves `mft_reference` on same-volume moves and clears it on cross-volume moves.
+    /// Returns `0` without modifying destination entries if no source row or descendant is indexed.
+    ///
+    /// # Errors
+    /// Returns an error if the destination volume is unindexed on a cross-volume move
+    /// or if the database transaction cannot be committed.
+    pub fn reconcile_moved_directory(&self, old_path: &str, new_path: &str, new_name: &str) -> Result<usize> {
+        if old_path == new_path {
+            return Ok(0);
+        }
+
+        let destination_volume = self.get_volume_id_for_path(new_path)?;
+        let transaction = self.connection.unchecked_transaction()?;
+
+        let source_volume: Option<i64> = if is_unix_path_key(old_path) {
+            transaction
+                .query_row(
+                    "SELECT volume_id FROM files WHERE full_path = ?1 \
+                     OR substr(full_path, 1, length(?1) + 1) = ?1 || '/' LIMIT 1",
+                    rusqlite::params![old_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+        } else {
+            transaction
+                .query_row(
+                    "SELECT volume_id FROM files WHERE full_path = ?1 \
+                     OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/') LIMIT 1",
+                    rusqlite::params![old_path],
+                    |row| row.get(0),
+                )
+                .optional()?
+        };
+
+        let Some(source_volume_id) = source_volume else {
+            return Ok(0);
+        };
+
+        if destination_volume.is_none() && get_volume_prefix(old_path) != get_volume_prefix(new_path) {
+            anyhow::bail!("Destination volume is not indexed: {new_path}");
+        }
+        let target_volume_id = destination_volume.unwrap_or(source_volume_id);
+
+        // Clear any stale entries occupying the destination subtree inside the same transaction.
+        if is_unix_path_key(new_path) {
+            transaction.execute(
+                "DELETE FROM files WHERE full_path = ?1 \
+                 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
+                rusqlite::params![new_path],
+            )?;
+        } else {
+            let backslash_new = windows_backslash_spelling(new_path);
+            transaction.execute(
+                "DELETE FROM files WHERE full_path IN (?1, ?2) \
+                 OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/') \
+                 OR substr(full_path, 1, length(?2) + 1) IN (?2 || '\\', ?2 || '/')",
+                rusqlite::params![new_path, backslash_new],
+            )?;
+        }
+
+        let updated = if is_unix_path_key(old_path) {
+            transaction.execute(
+                "UPDATE files \
+                 SET full_path = ?2 || substr(full_path, length(?1) + 1), \
+                     name = CASE WHEN full_path = ?1 THEN ?3 ELSE name END, \
+                     mft_reference = CASE WHEN volume_id = ?4 THEN mft_reference ELSE NULL END, \
+                     volume_id = ?4 \
+                 WHERE full_path = ?1 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
+                rusqlite::params![old_path, new_path, new_name, target_volume_id],
+            )?
+        } else {
+            transaction.execute(
+                "UPDATE files \
+                 SET full_path = ?2 || substr(full_path, length(?1) + 1), \
+                     name = CASE WHEN full_path = ?1 THEN ?3 ELSE name END, \
+                     mft_reference = CASE WHEN volume_id = ?4 THEN mft_reference ELSE NULL END, \
+                     volume_id = ?4 \
+                 WHERE full_path = ?1 \
+                    OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/')",
+                rusqlite::params![old_path, new_path, new_name, target_volume_id],
+            )?
+        };
+
         transaction.commit()?;
         Ok(updated)
     }
@@ -1229,6 +1351,20 @@ where
 {
     if processed == total || processed.is_multiple_of(DUPLICATE_PROGRESS_UPDATE_INTERVAL) {
         update_progress(processed, total);
+    }
+}
+
+/// Return whether `path` is a Unix path key whose only directory separator is `/`.
+fn is_unix_path_key(path: &str) -> bool {
+    path.starts_with('/') && !crate::scope::is_windows_style_path(path)
+}
+
+/// Return the backslash spelling of a Windows path, avoiding allocation when already using backslashes.
+fn windows_backslash_spelling(path: &str) -> Cow<'_, str> {
+    if path.contains('/') {
+        Cow::Owned(path.replace('/', "\\"))
+    } else {
+        Cow::Borrowed(path)
     }
 }
 
@@ -4725,5 +4861,114 @@ mod test_subtree_paths {
         assert_eq!(file.name, "a.txt");
         assert!(database.get_file_by_path("/data/di").unwrap().is_none());
         assert!(database.get_file_by_path("/data/dir/missing.txt").unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod test_reconcile_moved_directory {
+    use super::*;
+    use crate::types::{FileEntry, IndexedVolume, VolumeType};
+
+    #[test]
+    fn cross_volume_move_updates_volume_id_and_clears_mft_reference() {
+        let database = Database::open_in_memory().unwrap();
+        let volume_a = database
+            .upsert_volume(&IndexedVolume::new("VOL-A".into(), "/data/a".into(), VolumeType::Local))
+            .unwrap();
+        let volume_b = database
+            .upsert_volume(&IndexedVolume::new("VOL-B".into(), "/data/b".into(), VolumeType::Local))
+            .unwrap();
+
+        for (volume_id, path, is_directory, mft) in [
+            (volume_a, "/data/a/show", true, Some(100)),
+            (volume_a, "/data/a/show/ep1.mkv", false, Some(101)),
+            (volume_a, "/data/a/show\\literal", false, Some(102)),
+            (volume_b, "/data/b/show", true, Some(200)),
+            (volume_b, "/data/b/show/stale.mkv", false, Some(201)),
+        ] {
+            let name = Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+            database
+                .insert_file(&FileEntry {
+                    id: None,
+                    volume_id,
+                    parent_id: None,
+                    name,
+                    full_path: path.into(),
+                    is_directory,
+                    size: 5,
+                    created_time: None,
+                    modified_time: None,
+                    mft_reference: mft,
+                })
+                .unwrap();
+        }
+
+        let moved = database
+            .reconcile_moved_directory("/data/a/show", "/data/b/show", "show")
+            .unwrap();
+        assert_eq!(moved, 2);
+
+        let moved_dir = database.get_file_by_path("/data/b/show").unwrap().unwrap();
+        let moved_file = database.get_file_by_path("/data/b/show/ep1.mkv").unwrap().unwrap();
+        assert_eq!(moved_dir.volume_id, volume_b);
+        assert_eq!(moved_file.volume_id, volume_b);
+        assert_eq!(moved_dir.mft_reference, None);
+        assert_eq!(moved_file.mft_reference, None);
+        assert!(database.get_file_by_path("/data/b/show/stale.mkv").unwrap().is_none());
+        // Literal backslash in Unix filename must stay untouched on volume_a.
+        let literal = database.get_file_by_path("/data/a/show\\literal").unwrap().unwrap();
+        assert_eq!(literal.volume_id, volume_a);
+        assert_eq!(literal.mft_reference, Some(102));
+    }
+
+    #[test]
+    fn same_volume_move_preserves_mft_reference_and_handles_missing_parent_row() {
+        let database = Database::open_in_memory().unwrap();
+        let volume = database
+            .upsert_volume(&IndexedVolume::new("NTFS-C".into(), "C:".into(), VolumeType::Ntfs))
+            .unwrap();
+
+        // Only descendants are indexed.
+        // Parent directory row C:\old is absent.
+        database
+            .insert_file(&FileEntry {
+                id: None,
+                volume_id: volume,
+                parent_id: None,
+                name: "ep1.mkv".into(),
+                full_path: r"C:\old\ep1.mkv".into(),
+                is_directory: false,
+                size: 10,
+                created_time: None,
+                modified_time: None,
+                mft_reference: Some(777),
+            })
+            .unwrap();
+
+        let moved = database.reconcile_moved_directory(r"C:\old", r"C:\new", "new").unwrap();
+        assert_eq!(moved, 1);
+
+        let entry = database.get_file_by_path(r"C:\new\ep1.mkv").unwrap().unwrap();
+        assert_eq!(entry.volume_id, volume);
+        assert_eq!(entry.mft_reference, Some(777));
+    }
+
+    #[test]
+    fn unindexed_cross_volume_destination_rolls_back_without_deleting_destination() {
+        let database = Database::open_in_memory().unwrap();
+        let volume = database
+            .upsert_volume(&IndexedVolume::new("NTFS-C".into(), "C:".into(), VolumeType::Ntfs))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(volume, "dir".into(), r"C:\dir".into(), true))
+            .unwrap();
+        database
+            .insert_file(&FileEntry::new(volume, "a.txt".into(), r"C:\dir\a.txt".into(), false))
+            .unwrap();
+
+        let result = database.reconcile_moved_directory(r"C:\dir", r"Z:\dir", "dir");
+        assert!(result.is_err());
+        assert!(database.get_file_by_path(r"C:\dir").unwrap().is_some());
+        assert!(database.get_file_by_path(r"C:\dir\a.txt").unwrap().is_some());
     }
 }
