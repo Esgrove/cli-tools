@@ -861,7 +861,13 @@ mod test_thumbnail_helpers {
         }
 
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let tricky_dir = temp_dir.path().join("O'Brien,Jr;a:b");
+        // Windows forbids ":" in file names, but its absolute paths still carry the drive colon and backslashes.
+        let tricky_name = if cfg!(windows) {
+            "O'Brien,Jr;a b"
+        } else {
+            "O'Brien,Jr;a:b"
+        };
+        let tricky_dir = temp_dir.path().join(tricky_name);
         std::fs::create_dir_all(&tricky_dir).expect("create tricky dir");
         let video_path = temp_dir.path().join("clip.mp4");
         let status = Command::new("ffmpeg")
@@ -963,7 +969,8 @@ mod test_thumbnail_helpers {
 
         assert_eq!(command.get_program(), "ffmpeg");
         assert!(arguments.contains(&"-nostdin".to_string()));
-        assert!(arguments.contains(&"./input.mp4".to_string()));
+        let expected_input = Path::new(".").join("input.mp4");
+        assert!(arguments.contains(&expected_input.to_string_lossy().into_owned()));
         assert!(arguments.contains(&"output.jpg".to_string()));
         assert!(arguments.contains(&"2".to_string()));
         assert!(arguments.iter().any(|argument| argument.contains("tile=3x4")));
@@ -1252,8 +1259,8 @@ mod test_thumbnail_file_discovery {
         let hidden = temp_directory.path().join(".hidden.mp4");
         std::fs::write(&visible, b"visible")?;
         std::fs::write(&hidden, b"hidden")?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&visible, temp_directory.path().join("link.mp4"))?;
+        // Without the symlink privilege on Windows, the hidden file is still checked.
+        cli_tools_common::test_support::create_symlink(&visible, &temp_directory.path().join("link.mp4"));
 
         let found = creator(temp_directory.path().to_path_buf(), false).gather_video_files()?;
         assert_eq!(found, vec![visible]);
