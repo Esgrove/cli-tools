@@ -26,6 +26,8 @@ esac
         .arg(input)
         .env("PATH", tree.join("bin"))
         .env("HOME", tree.dir("home"))
+        // Windows resolves the data directory from the known folder API and ignores HOME.
+        .env("CLI_TOOLS_DB", tree.join("home/cli-tools.db"))
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("XDG_CONFIG_HOME")
         .output()

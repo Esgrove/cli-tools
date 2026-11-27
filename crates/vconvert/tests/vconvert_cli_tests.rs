@@ -83,6 +83,8 @@ impl Sandbox {
         command
             .env("PATH", path)
             .env("HOME", self.root.path().join("home"))
+            // Windows resolves the data directory from the known folder API and ignores HOME.
+            .env("CLI_TOOLS_DB", self.root.path().join("home/cli-tools.db"))
             // The shared config lookup treats a set manifest directory as a test run and reads a fixture config.
             .env_remove("CARGO_MANIFEST_DIR")
             .env_remove("XDG_CONFIG_HOME")

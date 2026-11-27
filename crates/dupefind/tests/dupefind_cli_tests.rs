@@ -13,6 +13,11 @@ use cli_tools_common::test_support::TempTree;
 fn dupefind(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dupefind"))
         .args(arguments)
+        // Keep the scan cache and active locks out of the user database.
+        .env(
+            "CLI_TOOLS_DB",
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("dupefind-cli-tests/cli-tools.db"),
+        )
         .output()
         .expect("dupefind should run")
 }
