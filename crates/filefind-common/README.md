@@ -2,64 +2,33 @@
 
 Shared library for the filefind file indexing and search system.
 
-This crate provides common functionality used by all other filefind crates:
+This crate provides common functionality used by all filefind crates and by sibling tools that update an existing index:
 
-- **Configuration** - User configuration file handling (`~/.config/filefind.toml`)
-- **Database** - SQLite database operations for file index storage
-- **IPC** - Inter-process communication for daemon control (named pipes on Windows), behind the `ipc` feature
-- **Types** - Common data structures and type definitions
-- **Utilities** - Path classification, formatting helpers, and logging utilities
+- **Configuration** (`config`): User configuration file handling (`~/.config/filefind.toml`, `FILEFIND_CONFIG`, `FILEFIND_DB`)
+- **Database** (`database`): `SQLite` index database operations and versioned schema migrations via `cli-tools-db`
+- **Scope** (`scope`): Shared component-aware root ownership,
+  `exclude` and `exclude_patterns` rules, hidden-entry checks, and UTF-8 path validation
+- **External index updates** (`index_updates`):
+  `IndexUpdater` and `update_default_index` applying `cli_tools_common::PathChange` batches with symlink-alias resolution
+- **IPC** (`ipc`, behind the `ipc` feature):
+  Daemon IPC client and postcard protocol (Windows named pipes and Unix domain sockets)
+- **Types** (`types`): Common data structures (`FileEntry`, `IndexedVolume`, `VolumeType`, `FileChangeEvent`)
+- **Test support** (`test_support`, behind the `test-support` feature):
+  `IndexFixture` for seeding single-root and multi-root test indexes
 
-## Usage
+## Cargo features
 
-This crate is not intended to be used directly. Instead, use one of the following:
+All optional adapters are off by default so index-only consumers avoid extra dependencies:
 
-- [`filefind-cli`](../filefind-cli) - Command-line search interface
-- [`filefind-daemon`](../filefind-daemon) - Background indexing service
-- [`filefind-tray`](../filefind-tray) - System tray application
+- `clap`: Derives `clap::ValueEnum` on `HyperlinkMode` and `LogLevel`
+- `ipc`: Enables `postcard` serialization and the daemon IPC protocol and client
+- `logging`: Enables `tracing_subscriber::filter::LevelFilter` conversions on `LogLevel`
+- `test-support`: Enables `IndexFixture` for integration tests
 
-## Modules
+## Crates using `filefind-common`
 
-### `config`
-
-Handles user configuration loading and defaults:
-
-- `UserConfig` - Root configuration structure
-- `DaemonConfig` - Daemon-specific settings (paths, exclusions, logging)
-- `CliConfig` - CLI-specific settings (output format, colors)
-
-### `database`
-
-SQLite database operations:
-
-- File and directory entry storage
-- Volume tracking with serial numbers
-- Fast indexed search by filename
-- Support for glob patterns and regex searches
-- `update_file_path()` - Update a file's stored path after a move (clears MFT reference)
-
-### `ipc`
-
-Inter-process communication:
-
-- Named pipe client for Windows
-- Commands: stop, status, rescan, pause, resume, ping
-- Serialization using postcard (binary format)
-
-### `types`
-
-Common data structures:
-
-- `FileEntry` - Represents an indexed file or directory
-- `VolumeInfo` - Information about indexed volumes
-
-### Utilities
-
-Path and formatting helpers:
-
-- `PathType` enum for classifying paths (drive root, directory, UNC, network)
-- `get_volume_prefix()` - Extract a lowercase volume root
-  (drive letter or UNC server/share) from a path for same-volume comparison
-- `format_size()` - Human-readable file sizes
-- `format_number()` - Number formatting with separators
-- Print macros for colored terminal output
+- [`filefind-cli`](../filefind-cli): Command-line search interface (`features = ["clap"]`)
+- [`filefind-daemon`](../filefind-daemon): Background indexing service (`features = ["clap", "ipc", "logging"]`)
+- [`filefind-tray`](../filefind-tray): System tray and macOS menu bar application (`features = ["clap", "ipc", "logging"]`)
+- External cli-tools binaries (`dirmove`, `dots`, `dupefind`, `flipdate`, `qtorrent`, `rxrename`, `vconvert`, `vres`):
+  Default minimal features

@@ -4,24 +4,27 @@ Background file indexing service for the filefind system.
 
 This daemon monitors file systems and keeps the file index up to date using:
 
-- **NTFS MFT scanning**: Direct Master File Table reading for fast initial indexing
-- **USN Journal monitoring**: Efficient incremental change detection for NTFS drives
-- **File system watching**: Fallback for non-NTFS and network drives
+- **NTFS MFT scanning (Windows)**: Direct Master File Table reading for fast initial indexing
+- **USN Journal monitoring (Windows)**: Efficient incremental change detection for NTFS drives
+- **Directory walking and native watchers (macOS, Linux, and non-NTFS drives)**:
+  Concurrent directory scanning with FSEvents on macOS,
+  inotify on Linux, and ReadDirectoryChangesW on Windows
 
 ## Features
 
-- Index millions of files in seconds using MFT direct reading
-- Real-time updates via USN Journal monitoring
-- Support for full drives, specific directories, and network paths
-- Background operation with IPC control interface
-- Configurable exclusions and logging
+- Index millions of files in seconds using MFT direct reading on Windows NTFS drives
+- Real-time updates via USN Journal on NTFS and native file watchers elsewhere
+- Explicit absolute directory roots on macOS and Linux (validated before startup)
+- Exclusive per-user Unix domain socket ownership (`0700` directory, `0600` socket) or Windows named pipe IPC
+- Reconciles walked roots on startup and keeps healthy watchers armed across rescans
+- Configurable `exclude` rules, `exclude_patterns` globs, and logging
 
 ## Usage
 
 ```
-Filefind background file indexing daemon
+Background filefind daemon that indexes files and follows file system changes
 
-Usage: filefindd.exe [OPTIONS] [COMMAND]
+Usage: filefindd [OPTIONS] [COMMAND]
 
 Commands:
   start       Start the daemon and begin indexing
@@ -52,7 +55,7 @@ Start the daemon and begin indexing:
 ```
 Start the daemon and begin indexing
 
-Usage: filefindd.exe start [OPTIONS]
+Usage: filefindd start [OPTIONS]
 
 Options:
   -f, --foreground       Run in foreground instead of daemonizing
@@ -70,7 +73,7 @@ Perform a one-time scan without starting the daemon:
 ```
 Perform a one-time scan without starting the daemon
 
-Usage: filefindd.exe scan [OPTIONS] [PATH]
+Usage: filefindd scan [OPTIONS] [PATH]
 
 Arguments:
   [PATH]  Specific path to scan (defaults to all configured drives)
@@ -89,7 +92,7 @@ List indexed volumes:
 ```
 List indexed volumes
 
-Usage: filefindd.exe volumes [OPTIONS]
+Usage: filefindd volumes [OPTIONS]
 
 Options:
   -d, --detailed         Show detailed information
@@ -105,7 +108,7 @@ Delete the database and start fresh:
 ```
 Delete the database and start fresh
 
-Usage: filefindd.exe reset [OPTIONS]
+Usage: filefindd reset [OPTIONS]
 
 Options:
   -f, --force            Skip confirmation prompt
@@ -121,7 +124,7 @@ Remove database entries for files/directories that no longer exist:
 ```
 Remove database entries for files/directories that no longer exist
 
-Usage: filefindd.exe prune [OPTIONS]
+Usage: filefindd prune [OPTIONS]
 
 Options:
   -l, --log <LOG_LEVEL>  Set the log level [possible values: error, warn, info, debug, trace]
@@ -136,7 +139,7 @@ Generate shell completion scripts:
 ```
 Generate shell completion scripts
 
-Usage: filefindd.exe completion [OPTIONS] <SHELL>
+Usage: filefindd completion [OPTIONS] <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate completion for [possible values: bash, elvish, fish, powershell, zsh]

@@ -276,13 +276,18 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `helpers.rs` - Output path, duration, and disk space helpers
 - filefind, a Windows first file indexer with fast search, in four crates.
   Each crate has its own `AGENTS.md` with its architecture notes.
-    - `crates/filefind-common/` → `filefind-common` - Library shared by the filefind crates
-      and by the tools that update the index:
-        - `config.rs` - The `filefind.toml` user config with the daemon and CLI sections
-        - `database.rs` - `SQLite` index database with volumes and files keyed by full path
-        - `index_updates.rs` - `IndexUpdater` applying the moves and removals tools report as `PathChange`
-        - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
-        - `types.rs` - File entries, volumes, and file change events
+- `crates/filefind-common/` → `filefind-common` - Library shared by the filefind crates
+  and by the tools that update the index:
+  - `config.rs` - The `filefind.toml` user config with the daemon and CLI sections,
+    plus optional `clap` and `logging` adapters
+  - `database.rs` - `SQLite` index database with volumes,
+    files keyed by full path, and atomic `reconcile_moved_directory`
+  - `scope.rs` - Shared component-aware root ownership,
+    `exclude` and `exclude_patterns` rules, hidden checks, and UTF-8 validation
+  - `index_updates.rs` - `IndexUpdater` applying the moves
+    and removals tools report as `PathChange` with aliased-root resolution
+  - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature (overridable with `FILEFIND_IPC_PATH`)
+  - `types.rs` - File entries, volumes, and file change events
     - `crates/filefind-cli/` → `filefind` - Search the index, find duplicates, and move matching files
     - `crates/filefind-daemon/` → `filefindd` - Background indexer using NTFS MFT reads, the USN journal,
       and a file system watcher for other drives

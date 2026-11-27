@@ -4,22 +4,23 @@
 [daemon]
 # Paths to index (drives, directories, or network locations).
 #
-# Can include:
-# - Drive letters (e.g., "C:", "D:") - indexes entire drive using fast NTFS MFT scanning
-# - Specific directories (e.g., "C:\\Users", "D:\\Projects") - uses MFT scanning
-#   but only stores entries under the specified paths (fast AND selective)
-# - Mapped network drives (e.g., "Z:") - MFT scanning is attempted first.
-#   If not available (most NAS devices), falls back to directory walking automatically
-# - UNC paths (e.g., "\\\\server\\share") - uses directory walking (no drive letter)
+# Windows:
+# - Drive letters (e.g., "C:", "D:") use fast NTFS MFT scanning
+# - Specific directories (e.g., "C:\\Users", "D:\\Projects") use MFT scanning with path filtering
+# - Mapped network drives (e.g., "Z:") attempt MFT first and fall back to directory walking
+# - UNC paths (e.g., "\\\\server\\share") use directory walking
+# - If empty on Windows, all available local NTFS drives are auto-detected (network drives are never auto-detected)
 #
-# If empty or not specified, all available local NTFS drives will be auto-detected.
-# Network drives are NOT auto-detected - add them explicitly if needed.
+# macOS and Linux:
+# - Explicit absolute directories are required (for example ["/Users/you/Documents", "/Volumes/Media"])
+# - Empty paths fails with a configuration hint so personal directories are never scanned silently
 #
 # Examples:
-# paths = ["C:", "D:"]                                    # Index entire local drives
-# paths = ["C:\\Users\\Me\\Documents", "D:\\Projects"]   # Index specific directories
-# paths = ["C:", "Z:"]                                   # Local drive + mapped NAS
-# paths = ["C:", "\\\\nas\\media"]                       # Local drive + UNC path
+# paths = ["C:", "D:"]                                    # Windows: entire local drives
+# paths = ["C:\\Users\\Me\\Documents", "D:\\Projects"]    # Windows: specific directories
+# paths = ["C:", "\\\\nas\\media"]                        # Windows: local drive + UNC path
+# paths = ["/Users/me/Documents", "/Volumes/Media"]       # macOS: explicit directories
+# paths = ["/home/me/Documents", "/mnt/media"]            # Linux: explicit directories
 # paths = []
 
 # Directories to exclude from indexing (case-insensitive).
@@ -55,7 +56,12 @@ exclude_patterns = ["*.tmp", "~$*", "Thumbs.db", "*.parts"]
 # Verbose output (typically set via CLI --verbose flag)
 # verbose = false
 
-# Database location (default: ~/.local/share/filefind/filefind.db)
+# Database location.
+# Defaults:
+#   Windows: %LOCALAPPDATA%\filefind\filefind.db
+#   macOS:   ~/Library/Application Support/filefind/filefind.db
+#   Linux:   ${XDG_DATA_HOME:-~/.local/share}/filefind/filefind.db
+# Can also be overridden with the FILEFIND_DB environment variable.
 # database_path = ""
 
 # Force clean scan (delete existing entries before inserting new ones).

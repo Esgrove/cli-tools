@@ -24,7 +24,7 @@ This is the main user-facing tool for searching files indexed by the filefind da
 ```
 Command-line interface for filefind file search
 
-Usage: filefind.exe [OPTIONS] [PATTERNS]... [COMMAND]
+Usage: filefind [OPTIONS] [PATTERNS]... [COMMAND]
 
 Commands:
   stats       Show index statistics
@@ -50,6 +50,7 @@ Options:
   -l, --list             List output (shortcut for --output list)
   -N, --name             Name-only output (shortcut for --output name)
   -s, --sort <SORT>      Sort results by this field [possible values: name, size]
+  -L, --links <MODE>     Emit clickable terminal hyperlinks for result paths [possible values: auto, always, never]
   -i, --info             Info output with file sizes (shortcut for --output info)
   -v, --verbose          Print verbose output
   -e, --exact            Exact pattern matches only
@@ -66,7 +67,7 @@ Show index statistics:
 ```
 Show index statistics
 
-Usage: filefind.exe stats [OPTIONS]
+Usage: filefind stats [OPTIONS]
 
 Options:
   -v, --verbose  Print verbose output
@@ -80,7 +81,7 @@ List all indexed volumes:
 ```
 List all indexed volumes
 
-Usage: filefind.exe volumes [OPTIONS]
+Usage: filefind volumes [OPTIONS]
 
 Options:
   -s, --sort [<SORT>]  Sort volumes by this field [possible values: name, size, files]
@@ -96,7 +97,7 @@ Files are grouped by their stem (filename without extension):
 ```
 Find duplicate files (same name ignoring extension, case-insensitive)
 
-Usage: filefind.exe duplicates [OPTIONS]
+Usage: filefind duplicates [OPTIONS]
 
 Options:
   -d, --drive <DRIVE>  Search only in specific drives. Accepts: "C", "C:", or "C:\"
@@ -112,7 +113,7 @@ Generate shell completion scripts:
 ```
 Generate shell completion scripts
 
-Usage: filefind.exe completion [OPTIONS] <SHELL>
+Usage: filefind completion [OPTIONS] <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate completion for [possible values: bash, elvish, fish, powershell, zsh]

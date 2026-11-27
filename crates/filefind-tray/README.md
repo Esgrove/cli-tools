@@ -1,25 +1,22 @@
 # filefind-tray
 
-System tray application for easily controlling the filefind daemon when it is running in the background.
+System tray and macOS menu bar application for controlling the filefind daemon.
 
-This application provides a convenient graphical interface for managing
-the filefind background indexing service from the Windows system tray.
+This application provides a minimal graphical interface for managing the
+`filefindd` background indexing service on Windows, macOS, and Linux.
 
 ## Features
 
-- **Status indicator**: Tray icon color shows daemon state
-    - 🟢 Green: Running
-    - 🟠 Orange: Scanning
-    - ⚫ Gray: Stopped
+- **Status indicator**: Tray icon color shows daemon state (green for running, orange for scanning, gray for stopped)
 - **Tooltip**: Shows indexed file and directory counts
 - **Quick controls**: Start, stop, and rescan from the tray menu
 
 ## Usage
 
 ```
-Filefind system tray application
+System tray application that controls the filefind daemon
 
-Usage: filefind-tray.exe [OPTIONS] [COMMAND]
+Usage: filefind-tray [OPTIONS] [COMMAND]
 
 Commands:
   completion  Generate shell completion scripts
@@ -39,7 +36,9 @@ Simply run the application:
 filefind-tray
 ```
 
-The application will appear in the system tray. Right-click the icon to access the menu.
+When launched from a terminal, `filefind-tray` detaches once and returns the shell prompt.
+Click the menu bar icon on macOS (or right-click the system tray icon on Windows and Linux) to open the menu.
+Use `--foreground` to keep the process attached with console logging.
 
 ### Subcommands
 
@@ -50,7 +49,7 @@ Generate shell completion scripts:
 ```
 Generate shell completion scripts
 
-Usage: filefind-tray.exe completion [OPTIONS] <SHELL>
+Usage: filefind-tray completion [OPTIONS] <SHELL>
 
 Arguments:
   <SHELL>  Shell to generate completion for [possible values: bash, elvish, fish, powershell, zsh]
@@ -61,32 +60,31 @@ Options:
   -h, --help     Print help
 ```
 
-### Menu Options
+### Menu options
 
-| Option           | Description                                  |
-| ---------------- | -------------------------------------------- |
-| **Status**       | Shows current daemon state and file count    |
-| **Start daemon** | Start the filefind daemon                    |
-| **Stop daemon**  | Stop the running daemon                      |
-| **Rescan**       | Trigger a full rescan of all indexed volumes |
-| **About**        | Show application information                 |
-| **Quit**         | Exit the tray application                    |
+| Option | Description |
+| --- | --- |
+| **Status** | Shows current daemon state and file count |
+| **Start daemon** | Starts the sibling `filefindd` process (`filefindd start`) |
+| **Stop daemon** | Sends a Stop IPC command to the running daemon |
+| **Rescan** | Sends a Rescan IPC command for all indexed roots |
+| **About Filefind** | Shows application metadata |
+| **Quit** | Exits only the tray application and leaves any running daemon intact |
 
-## Auto-start on Login
+## Platform notes
 
-To have the tray application start automatically when you log in:
+- **macOS**: Runs on the main-thread `AppKit` event loop with an accessory activation policy (no Dock icon),
+  initializes the event loop before creating the status item,
+  and locates the sibling `filefindd` executable without depending on `PATH`.
+- **Linux**: Uses the AppIndicator backend driven by the GTK event loop.
+  Building requires `libgtk-3-dev`, `libayatana-appindicator3-dev`, and `libxdo-dev`,
+  and running requires an active graphical display session.
+- **Windows**: Runs on the Win32 message loop and uses `ShellExecuteW` with `runas` when starting `filefindd`
+  so the daemon can elevate for NTFS MFT and USN Journal access.
 
-### Using Task Scheduler
+## Auto-start on login (Windows)
 
-1. Open Task Scheduler (`taskschd.msc`)
-2. Click "Create Basic Task..."
-3. Name: `filefind tray`
-4. Trigger: "When I log on"
-5. Action: "Start a program"
-6. Program: `C:\Users\<username>\.cargo\bin\filefind-tray.exe`
-7. Finish
-
-### Using PowerShell
+To have the tray application start automatically when you log in on Windows:
 
 ```powershell
 $action = New-ScheduledTaskAction -Execute "$env:USERPROFILE\.cargo\bin\filefind-tray.exe"
@@ -95,33 +93,10 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 Register-ScheduledTask -TaskName "filefind tray" -Action $action -Trigger $trigger -Settings $settings
 ```
 
-## Examples
-
-```shell
-# Run in foreground with console logging
-filefind-tray --foreground
-
-# Run with verbose logging
-filefind-tray --verbose
-
-# Generate shell completion
-filefind-tray completion powershell
-filefind-tray completion bash --install
-```
-
 ## Architecture
 
-The tray application:
-
-1. Creates a system tray icon using the `tray-icon` crate
-2. Periodically polls the daemon status via IPC (named pipes)
-3. Updates the icon color and tooltip based on daemon state
-4. Handles menu events to control the daemon
-
-### IPC Communication
-
-The tray app uses the same IPC client as the CLI to communicate with the daemon:
-
-- Connects to named pipe `\\.\pipe\filefind`
-- Sends commands: start, stop, rescan, status
-- Receives status updates with file/directory counts
+1. Runs a platform-native event loop (`AppKit` on macOS, Win32 on Windows, GTK on Linux)
+2. Polls daemon status and runs Start, Stop, and Rescan on a background worker thread so the UI never stalls on IPC
+3. Communicates with `filefindd` over `\\.\pipe\filefind-daemon` on Windows
+   or the per-user Unix domain socket on macOS and Linux (overridable via `FILEFIND_IPC_PATH`)
+4. Launches `filefindd start` directly to start the daemon, then uses IPC for status, stop, and rescan

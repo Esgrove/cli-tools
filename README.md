@@ -235,14 +235,17 @@ Options:
 
 ## Filefind
 
-Fast file indexing and search, built first for Windows.
-The `filefindd` daemon indexes NTFS drives by reading the Master File Table directly
+Fast file indexing and search, built first for Windows with directory walking and native watching on macOS and Linux.
+On Windows, the `filefindd` daemon indexes NTFS drives by reading the Master File Table directly
 and follows changes through the USN journal, with directory walking and a file watcher for other drives.
-The `filefind` CLI searches the index, and `filefind-tray` controls the daemon from the system tray.
+On macOS and Linux,
+`filefindd` indexes explicit absolute directories configured in `~/.config/filefind.toml` using directory walking
+and native file system watchers (FSEvents on macOS, inotify on Linux).
+The `filefind` CLI searches the index, and `filefind-tray` controls the daemon from the system tray or macOS menu bar.
 Configuration is read from `~/.config/filefind.toml`, see [`filefind.toml`](./filefind.toml) for an example.
-See [`docs/filefind.md`](./docs/filefind.md) for the full documentation.
+See [`docs/filefind.md`](./docs/filefind.md) for the full documentation and platform setup.
 
-The tools that rename, move, or delete files, dirmove, dots, dupefind, flipdate, rxrename, vconvert, and vres,
+The tools that rename, move, or delete files, dirmove, dots, dupefind, flipdate, qtorrent, rxrename, vconvert, and vres,
 update an existing filefind index after each run.
 Moves on network drives and other drives without the USN journal show up in searches right away,
 instead of after the next rescan.

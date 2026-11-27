@@ -12,11 +12,14 @@ The other filefind crates have their own `AGENTS.md`:
 ## Modules
 
 - `lib.rs` - Library root, re-exports, path classification, and drive mapping helpers
-- `config.rs` - User configuration file handling
+- `config.rs` - User configuration file handling (`clap` and `logging` adapters are optional Cargo features)
 - `database.rs` - `SQLite` index database operations
 - `database/schema.rs` - Versioned index schema, migrated as the `filefind_index` component of `cli-tools-db`
-- `index_updates.rs` - `IndexUpdater`, which applies the moves and removals other tools report as `PathChange`
-- `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
+- `scope.rs` - Shared component-aware root ownership, `exclude`, `exclude_patterns`, hidden checks,
+  and UTF-8 path validation
+- `index_updates.rs` - `IndexUpdater`, which applies the moves
+  and removals other tools report as `PathChange` with aliased-root resolution
+- `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature (`FILEFIND_IPC_PATH` override)
 - `test_support.rs` - `IndexFixture` for tests of tools that update the index, behind the `test-support` feature
 - `types.rs` - File entries, volumes, and file change events
 
@@ -29,16 +32,20 @@ The other filefind crates have their own `AGENTS.md`:
 - The schema version is recorded in `schema_migrations` through `cli_tools_db::sqlite::migrate_component`.
   Bump `INDEX_SCHEMA_VERSION` and add a migration step for every schema change.
 - `update_file_path()` updates a file's stored path after a move and clears its MFT reference.
-- `rebase_files_under_path()` moves a directory and every entry under it in one statement.
+- `reconcile_moved_directory()` replaces stale destination rows,
+  rebases a directory subtree (even without an indexed parent row), updates volume ownership,
+  and preserves valid same-volume MFT references in one transaction.
 - The CLI and the daemon open the database directly. WAL mode lets the CLI write while the daemon runs.
 
 ## IPC
 
-- Named pipes on Windows, Unix domain sockets on other platforms.
+- Named pipes on Windows (`\\.\pipe\filefind-daemon`),
+  private per-user Unix domain sockets on macOS and Linux (`FILEFIND_IPC_PATH` overrides the path).
 - Postcard serialized commands and responses, framed with a two byte length prefix.
 - Commands: stop, status, rescan, pause, resume, ping, and prune.
-- The client in `ipc.rs` is used by the tray app.
-  The server lives in `crates/filefind-daemon/src/ipc_server.rs`.
+- The client in `ipc.rs` is used by the tray app and daemon CLI subcommands.
+  The server lives in `crates/filefind-daemon/src/ipc_server.rs`
+  and holds an exclusive lock file for the daemon lifetime on Unix.
 
 ## Configuration
 
