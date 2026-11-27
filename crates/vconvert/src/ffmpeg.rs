@@ -1130,7 +1130,8 @@ mod test_external_subtitle_maps {
         let command = build_conversion_command(&options).expect("build videotoolbox command");
         let args = command_args(&command);
 
-        assert!(has_arg_pair(&args, "-i", "./-dash:clip.mkv"));
+        let expected_input = Path::new(".").join("-dash:clip.mkv");
+        assert!(has_arg_pair(&args, "-i", &expected_input.to_string_lossy()));
         assert!(has_arg_pair(&args, "-c:v", "hevc_videotoolbox"));
         assert!(has_arg_pair(&args, "-profile:v", "main10"));
         assert!(has_arg_pair(&args, "-pix_fmt", "p010le"));
