@@ -427,7 +427,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "cli-tools-common"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-db"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "cli-tools-common",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dirmove"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-div"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dots"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dupefind"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-flipdate"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-media"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-qtorrent"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-rsbump"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-rxrename"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-slb"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-thumbs"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vconvert"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-visaparse"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vres"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vstats"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vtag"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-xtask"
-version = "12.0.0"
+version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
