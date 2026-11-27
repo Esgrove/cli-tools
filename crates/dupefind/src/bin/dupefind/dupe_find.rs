@@ -942,13 +942,17 @@ mod test_gather_nested_trees {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinks_to_files_and_directories_are_not_followed() {
         let tree = TempTree::with_entries(&["library/a/b/movie.mp4"]);
-        tree.symlink("library", "shortcut");
-        tree.symlink("library", "library/a/b/loop");
-        tree.symlink("library/a/b/movie.mp4", "linked.mp4");
+        let links = [
+            tree.try_symlink("library", "shortcut"),
+            tree.try_symlink("library", "library/a/b/loop"),
+            tree.try_symlink("library/a/b/movie.mp4", "linked.mp4"),
+        ];
+        if links.iter().any(Option::is_none) {
+            return;
+        }
 
         assert_eq!(
             gathered(&tree, vec![tree.path().to_path_buf()], true),
