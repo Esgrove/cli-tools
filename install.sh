@@ -48,6 +48,29 @@ if [ -z "$(command -v cargo)" ]; then
     print_error_and_exit "Cargo not found in path. Maybe install rustup?"
 fi
 
+# Print the names of the long running filefind processes that are currently running.
+# A running executable is locked on Windows, so cargo install cannot replace it.
+running_background_processes() {
+    if [ "$BASH_PLATFORM" = "windows" ]; then
+        # Get-Process also lists elevated processes, which the daemon usually is.
+        powershell.exe -NoProfile -Command \
+            "Get-Process -Name filefindd,filefind-tray -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName" |
+              tr -d '\r'
+    else
+        local process_name
+        for process_name in filefindd filefind-tray; do
+            if pgrep -x "$process_name" > /dev/null 2>&1; then
+                echo "$process_name"
+            fi
+        done
+    fi
+}
+
+RUNNING_PROCESSES=$(running_background_processes)
+if [ -n "$RUNNING_PROCESSES" ]; then
+    print_error_and_exit "Stop these before installing: $(echo "$RUNNING_PROCESSES" | sort -u | tr '\n' ' ')"
+fi
+
 print_magenta "Installing binaries..."
 cd "$REPO_ROOT"
 
