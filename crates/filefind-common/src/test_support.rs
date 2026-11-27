@@ -44,9 +44,11 @@ impl IndexFixture {
             })
             .expect("the fixture volume should be inserted");
         for entry in entries {
-            let metadata = std::fs::metadata(entry).expect("an indexed fixture entry should exist");
+            // The index stores normalized absolute paths, so mixed separators from test helpers are normalized too.
+            let entry = std::path::absolute(entry).expect("a fixture entry should have an absolute path");
+            let metadata = std::fs::metadata(&entry).expect("an indexed fixture entry should exist");
             database
-                .insert_file(&FileEntry::from_metadata(volume_id, entry, &metadata))
+                .insert_file(&FileEntry::from_metadata(volume_id, &entry, &metadata))
                 .expect("the fixture entry should be indexed");
         }
         fixture
