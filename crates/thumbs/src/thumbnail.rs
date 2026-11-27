@@ -15,7 +15,6 @@ use cli_tools_media::scan_cache::{CachedVideoInfo, ScanCache};
 use cli_tools_media::video_info::{VideoInfo, VideoStats, ffmpeg_input_path};
 use colored::Colorize;
 use rayon::prelude::*;
-use walkdir::WalkDir;
 
 use crate::ThumbnailArgs;
 use crate::config::Config;
@@ -246,15 +245,7 @@ impl ThumbnailCreator {
 
     /// Gather all video files from the input path.
     fn gather_video_files(&self) -> Result<Vec<PathBuf>> {
-        let mut video_files = Vec::new();
-
-        if self.root.is_file() {
-            if Self::is_video_file(&self.root) {
-                video_files.push(self.root.clone());
-            } else {
-                anyhow::bail!("File '{}' is not a supported video file", self.root.display());
-            }
-        } else if self.root.is_dir() {
+        if self.root.is_dir() {
             if self.config.recurse {
                 println!(
                     "{}",
@@ -266,29 +257,8 @@ impl ThumbnailCreator {
                     format!("Searching for video files in: {}", self.root.display()).magenta()
                 );
             }
-            let walker = if self.config.recurse {
-                WalkDir::new(&self.root)
-            } else {
-                WalkDir::new(&self.root).max_depth(1)
-            };
-            for entry in walker
-                .into_iter()
-                .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-            {
-                let path = entry.path().to_path_buf();
-                if Self::is_video_file(&path) {
-                    video_files.push(path);
-                }
-            }
-        } else {
-            anyhow::bail!("Path '{}' does not exist", self.root.display());
         }
-
-        video_files.sort();
-
-        Ok(video_files)
+        cli_tools_media::discover_video_files(&self.root, self.config.recurse)
     }
 
     /// Choose thumbnail paths based on all video siblings, even for a single file invocation.

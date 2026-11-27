@@ -20,6 +20,7 @@ cli-tools-db = { workspace = true, optional = true }
 colored = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true, optional = true }
+walkdir = { workspace = true }
 
 [features]
 scan-cache = ["dep:cli-tools-db", "dep:rusqlite"]

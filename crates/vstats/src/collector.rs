@@ -11,7 +11,6 @@ use cli_tools_media::video_info::{VideoInfo, VideoStats};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use walkdir::WalkDir;
 
 use crate::config::Config;
 
@@ -147,15 +146,7 @@ impl StatsCollector {
 
     /// Gather all video files from the input path.
     fn gather_video_files(&self) -> Result<Vec<PathBuf>> {
-        let mut video_files = Vec::new();
-
-        if self.root.is_file() {
-            if Self::is_video_file(&self.root) {
-                video_files.push(self.root.clone());
-            } else {
-                anyhow::bail!("File '{}' is not a supported video file", self.root.display());
-            }
-        } else if self.root.is_dir() {
+        if self.root.is_dir() {
             if self.recurse {
                 println!(
                     "{}",
@@ -167,32 +158,8 @@ impl StatsCollector {
                     format!("Searching for video files in: {}", self.root.display()).magenta()
                 );
             }
-            let walker = if self.recurse {
-                WalkDir::new(&self.root)
-            } else {
-                WalkDir::new(&self.root).max_depth(1)
-            };
-            for entry in walker
-                .into_iter()
-                .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-            {
-                let path = entry.path().to_path_buf();
-                if Self::is_video_file(&path) {
-                    video_files.push(path);
-                }
-            }
-        } else {
-            anyhow::bail!("Path '{}' does not exist", self.root.display());
         }
-
-        Ok(video_files)
-    }
-
-    /// Check if a file is a video file based on the canonical extension list.
-    fn is_video_file(path: &Path) -> bool {
-        cli_tools_media::is_video_file(path)
+        cli_tools_media::discover_video_files(&self.root, self.recurse)
     }
 }
 
@@ -324,13 +291,13 @@ mod test_video_file_discovery {
 
     #[test]
     fn recognizes_supported_extensions_case_insensitively() {
-        assert!(StatsCollector::is_video_file(Path::new("video.mp4")));
-        assert!(StatsCollector::is_video_file(Path::new("video.MKV")));
-        assert!(StatsCollector::is_video_file(Path::new("video.webm")));
-        assert!(StatsCollector::is_video_file(Path::new("video.mpeg")));
-        assert!(StatsCollector::is_video_file(Path::new("video.ts")));
-        assert!(!StatsCollector::is_video_file(Path::new("notes.txt")));
-        assert!(!StatsCollector::is_video_file(Path::new("README")));
+        assert!(cli_tools_media::is_video_file(Path::new("video.mp4")));
+        assert!(cli_tools_media::is_video_file(Path::new("video.MKV")));
+        assert!(cli_tools_media::is_video_file(Path::new("video.webm")));
+        assert!(cli_tools_media::is_video_file(Path::new("video.mpeg")));
+        assert!(cli_tools_media::is_video_file(Path::new("video.ts")));
+        assert!(!cli_tools_media::is_video_file(Path::new("notes.txt")));
+        assert!(!cli_tools_media::is_video_file(Path::new("README")));
     }
 
     #[test]

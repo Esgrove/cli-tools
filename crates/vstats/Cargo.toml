@@ -24,7 +24,6 @@ indicatif = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
-walkdir = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion", "config"] }
 
 [dev-dependencies]

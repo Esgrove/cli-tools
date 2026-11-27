@@ -662,6 +662,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
@@ -758,7 +759,6 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
- "walkdir",
 ]
 
 [[package]]
@@ -846,7 +846,6 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
- "walkdir",
 ]
 
 [[package]]
