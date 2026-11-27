@@ -21,6 +21,7 @@ use windows_sys::Win32::System::Registry::{
 mod completion;
 pub mod config;
 pub mod database;
+#[cfg(feature = "ipc")]
 pub mod ipc;
 mod output;
 pub mod types;
@@ -28,6 +29,7 @@ pub mod types;
 pub use completion::generate_shell_completion;
 pub use config::{CONFIG_PATH, LogLevel, PathMapping, UserConfig as Config};
 pub use database::{Database, VolumeStats};
+#[cfg(feature = "ipc")]
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,
 };

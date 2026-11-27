@@ -19,7 +19,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 colored = { workspace = true }
 dirs = { workspace = true }
-filefind-common = { workspace = true }
+filefind-common = { workspace = true, features = ["ipc"] }
 futures = { workspace = true }
 notify = { workspace = true }
 rayon = { workspace = true }
