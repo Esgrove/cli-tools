@@ -51,6 +51,15 @@ pub enum UnpackEvent<'a> {
     /// An entry was left in place because another entry of the same directory moves to the same target,
     /// such as two names that only differ by case or by invalid UTF-8.
     DuplicateTarget(&'a Path),
+    /// An entry was moved into the parent directory.
+    Moved {
+        /// Entry that was moved.
+        source: &'a Path,
+        /// Its new path.
+        target: &'a Path,
+        /// Whether the entry is a directory, which moved with everything under it.
+        is_directory: bool,
+    },
     /// Moving an entry failed. The remaining entries are still moved.
     MoveFailed {
         /// Entry that could not be moved.
@@ -194,7 +203,11 @@ impl Unpacker {
 
             for PlannedMove { source, target } in &plan.directory_moves {
                 match self.move_directory(source, target, &parent, &mut touched_directories) {
-                    Ok(EntryMove::Moved) => {}
+                    Ok(EntryMove::Moved) => observer.on_unpack_event(UnpackEvent::Moved {
+                        source,
+                        target,
+                        is_directory: true,
+                    }),
                     Ok(EntryMove::SkippedExisting) => {
                         observer.on_unpack_event(UnpackEvent::SkippedExistingDirectory(target));
                     }
@@ -203,7 +216,11 @@ impl Unpacker {
             }
             for PlannedMove { source, target } in &plan.file_moves {
                 match self.move_file(source, target, &parent, &mut touched_directories) {
-                    Ok(EntryMove::Moved) => {}
+                    Ok(EntryMove::Moved) => observer.on_unpack_event(UnpackEvent::Moved {
+                        source,
+                        target,
+                        is_directory: false,
+                    }),
                     Ok(EntryMove::SkippedExisting) => {
                         observer.on_unpack_event(UnpackEvent::SkippedExistingFile(target));
                     }
@@ -1609,6 +1626,11 @@ mod test_unpack_events {
                 }
                 UnpackEvent::SkippedExistingFile(path) => format!("skipped file {}", path_to_filename_string(path)),
                 UnpackEvent::DuplicateTarget(path) => format!("duplicate {}", path_to_filename_string(path)),
+                UnpackEvent::Moved { source, target, .. } => format!(
+                    "moved {} -> {}",
+                    path_to_filename_string(source),
+                    path_to_filename_string(target)
+                ),
                 UnpackEvent::MoveFailed { source, .. } => format!("failed {}", path_to_filename_string(source)),
                 UnpackEvent::Pruned(path) => format!("pruned {}", path_to_filename_string(path)),
             };
@@ -1637,6 +1659,8 @@ mod test_unpack_events {
             [
                 "unwanted .unwanted",
                 "planned 1 files 1 directories into Movie",
+                "moved extra -> extra",
+                "moved english.srt -> english.srt",
                 "pruned subs"
             ]
         );
@@ -1717,7 +1741,14 @@ mod test_unpack_events {
 
         let events = unpack_recorded(&tree, true, false);
 
-        assert_eq!(events, ["planned 1 files 0 directories into Movie", "pruned subs"]);
+        assert_eq!(
+            events,
+            [
+                "planned 1 files 0 directories into Movie",
+                "moved english.srt -> english.srt",
+                "pruned subs"
+            ]
+        );
         assert_eq!(
             tree.snapshot(),
             ["Library/", "Library/Movie/", "Library/Movie/english.srt: new"]

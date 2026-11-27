@@ -102,7 +102,7 @@ impl MoveObserver for ConsoleReporter<'_> {
             MoveEvent::HashVerified(hash) if self.verbose => {
                 self.print(|| println!("  Hash verified: BLAKE3 {}", short_hash(hash)));
             }
-            MoveEvent::Moved(name) if self.verbose => self.print(|| println!("  Moved: {name}")),
+            MoveEvent::Moved { name, .. } if self.verbose => self.print(|| println!("  Moved: {name}")),
             MoveEvent::Failed { source, error } => {
                 self.print(|| print_error!("Failed to move {}: {error}", source.display()));
             }
@@ -208,7 +208,7 @@ impl UnpackObserver for ConsoleReporter<'_> {
             UnpackEvent::Pruned(directory) if self.verbose => {
                 println!("  {} Removed empty dir: {}", "→".green(), directory.display());
             }
-            UnpackEvent::Pruned(_) => {}
+            UnpackEvent::Pruned(_) | UnpackEvent::Moved { .. } => {}
         }
     }
 }

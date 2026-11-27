@@ -57,8 +57,15 @@ pub enum MoveEvent<'a> {
     Copied,
     /// The copy matched the source BLAKE3 hash.
     HashVerified(&'a blake3::Hash),
-    /// A file with this name was moved.
-    Moved(&'a str),
+    /// A file was moved.
+    Moved {
+        /// Name of the file in the target directory.
+        name: &'a str,
+        /// Path the file was moved from.
+        source: &'a Path,
+        /// Path the file was moved to.
+        destination: &'a Path,
+    },
     /// Moving the source failed.
     Failed {
         /// File that could not be moved.
@@ -214,7 +221,11 @@ fn process_file_moves(
 
         match move_single_file(file_path, &new_path, expected_size, overwrite, observer) {
             Ok(()) => {
-                observer.on_event(MoveEvent::Moved(&file_name));
+                observer.on_event(MoveEvent::Moved {
+                    name: &file_name,
+                    source: file_path,
+                    destination: &new_path,
+                });
                 report.moved_files.push(file_path.clone());
             }
             Err(error) => {
@@ -1139,5 +1150,63 @@ mod test_move_single_file {
             .expect_err("a partial destination should fail");
 
         assert!(error.to_string().contains("source is gone"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod test_moved_event_paths {
+    use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    /// Observer that records the source and destination of every moved file.
+    #[derive(Default)]
+    struct MovedPaths {
+        moved: Vec<(PathBuf, PathBuf, String)>,
+    }
+
+    impl MoveObserver for MovedPaths {
+        fn on_event(&mut self, event: MoveEvent<'_>) {
+            if let MoveEvent::Moved {
+                name,
+                source,
+                destination,
+            } = event
+            {
+                self.moved
+                    .push((source.to_path_buf(), destination.to_path_buf(), name.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn moved_events_carry_the_source_and_destination() {
+        let tree = TempTree::new();
+        let first = tree.file_with("input/first.txt", "first");
+        let second = tree.file_with("input/nested/second.txt", "second");
+        let target = tree.dir("target");
+        let mut observer = MovedPaths::default();
+
+        let report = move_files_to_target_dir(&target, &[first.clone(), second.clone()], false, &mut observer).unwrap();
+
+        assert_eq!(report.moved_count(), 2);
+        assert_eq!(
+            observer.moved,
+            vec![
+                (first, target.join("first.txt"), "first.txt".to_string()),
+                (second, target.join("second.txt"), "second.txt".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn previews_report_no_moved_events() {
+        let tree = TempTree::new();
+        let file = tree.file_with("input/first.txt", "first");
+        let mut observer = MovedPaths::default();
+
+        let report = preview_file_moves(&tree.join("target"), &[file], false, &mut observer).unwrap();
+
+        assert_eq!(report.moved_count(), 1);
+        assert_eq!(observer.moved, Vec::new());
     }
 }

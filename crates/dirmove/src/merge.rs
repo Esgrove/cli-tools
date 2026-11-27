@@ -33,6 +33,13 @@ pub enum MergeEvent<'a> {
     Skipped(&'a [String]),
     /// An entry was left in the source because its destination was already reserved by this batch.
     DuplicateTarget(&'a Path),
+    /// A whole directory was moved into the target, because the target had no directory with its name.
+    DirectoryMoved {
+        /// Directory that was moved.
+        source: &'a Path,
+        /// Its new path.
+        target: &'a Path,
+    },
     /// Number of entries moved, or that would be moved in a dry run.
     Moved(usize),
     /// The emptied source directory was removed.
@@ -207,6 +214,10 @@ impl DirectoryMerger {
                     reserve_directory_contents(&entry_path, &target_path, reservations)?;
                 }
                 move_directory_into_place(&entry_path, &target_path, self.overwrite)?;
+                observer.on_merge_event(MergeEvent::DirectoryMoved {
+                    source: &entry_path,
+                    target: &target_path,
+                });
             }
             moved_count += 1;
         }
@@ -1268,6 +1279,11 @@ mod test_merge_events {
                 MergeEvent::WouldMove(name) => format!("would move {name}"),
                 MergeEvent::Skipped(names) => format!("skipped {}", names.join(", ")),
                 MergeEvent::DuplicateTarget(path) => format!("duplicate target for {}", path.display()),
+                MergeEvent::DirectoryMoved { source, target } => format!(
+                    "moved directory {} -> {}",
+                    path_to_filename_string(source),
+                    path_to_filename_string(target)
+                ),
                 MergeEvent::Moved(count) => format!("moved {count} items"),
                 MergeEvent::SourceRemoved(source) => format!("removed {}", path_to_filename_string(source)),
                 MergeEvent::SourceRemoveFailed(source, _) => {
@@ -1286,6 +1302,29 @@ mod test_merge_events {
             .merge(&tree.join("source"), &tree.join("target"), &mut recorder)
             .expect("merging should succeed");
         recorder.events
+    }
+
+    #[test]
+    fn a_directory_missing_from_the_target_moves_whole() {
+        let tree = TempTree::new();
+        tree.file_with("source/nested/two.txt", "two");
+        tree.dir("target");
+
+        let events = merge_recorded(&tree, false, false);
+
+        assert_eq!(
+            events,
+            [
+                "started source -> target",
+                "moved directory nested -> nested",
+                "moved 1 items",
+                "removed source"
+            ]
+        );
+        assert_eq!(
+            tree.snapshot(),
+            ["target/", "target/nested/", "target/nested/two.txt: two"]
+        );
     }
 
     #[test]
