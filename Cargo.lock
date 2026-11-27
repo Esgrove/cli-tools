@@ -641,6 +641,7 @@ dependencies = [
  "clap_complete",
  "cli-tools-common",
  "colored",
+ "filefind-common",
  "serde",
  "tempfile",
  "toml 1.2.3+spec-1.1.0",

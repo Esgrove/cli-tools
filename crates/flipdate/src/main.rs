@@ -73,11 +73,16 @@ fn main() -> anyhow::Result<()> {
     }
     let path = cli_tools_common::resolve_input_path(args.path.as_deref())?;
     let config = flip_date::Config::from_args(args)?;
-    if config.directory_mode {
-        flip_date::date_flip_directories(path, &config)
+    let mut changes = Vec::new();
+    let result = if config.directory_mode {
+        flip_date::date_flip_directories(path, &config, &mut changes)
     } else {
-        flip_date::date_flip_files(&path, &config)
+        flip_date::date_flip_files(&path, &config, &mut changes)
+    };
+    for warning in filefind_common::update_default_index(&changes) {
+        cli_tools_common::print_yellow!("Could not update the filefind index: {warning}");
     }
+    result
 }
 
 #[cfg(test)]

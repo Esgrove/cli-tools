@@ -4,10 +4,12 @@
 //! and the exact tree left on disk.
 //! The user config during tests resolves to `crates/common/tests/fixtures/sample_config.toml`,
 //! which turns every `flip_date` option off, so each test passes the flags it relies on.
+//! The filefind index variables point inside the tree, so no run touches the user's index.
 
 use std::process::{Command, Output};
 
 use cli_tools_common::test_support::TempTree;
+use filefind_common::test_support::IndexFixture;
 
 /// Run the binary with the given arguments and an isolated home directory.
 fn run_flipdate(tree: &TempTree, args: &[&str]) -> Output {
@@ -17,6 +19,8 @@ fn run_flipdate(tree: &TempTree, args: &[&str]) -> Output {
         .env("HOME", tree.path())
         .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
         .env("NO_COLOR", "1")
+        .env("FILEFIND_DB", tree.join("home/filefind.db"))
+        .env("FILEFIND_CONFIG", tree.join("home/filefind.toml"))
         .output()
         .expect("flipdate should start")
 }
@@ -195,4 +199,18 @@ fn missing_path_is_an_error() {
 
     assert!(!output.status.success(), "{output:?}");
     assert_eq!(tree.snapshot(), Vec::<String>::new());
+}
+
+#[test]
+fn renames_move_the_entries_of_an_existing_filefind_index() {
+    let tree = TempTree::new();
+    let report = tree.file_with("media/Report 31.12.2020.txt", "report");
+    tree.file_with("media/Song 01.05.2021.mp3", "song");
+    let index = IndexFixture::create(&tree.join("home/filefind.db"), &tree.join("media"), &[report]);
+
+    let output = run_flipdate(&tree, &["--recurse", "media"]);
+
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert!(tree.exists("media/Song 2021.05.01.mp3"));
+    assert_eq!(index.indexed_paths(), vec!["Report 2020.12.31.txt"]);
 }

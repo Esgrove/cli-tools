@@ -9,7 +9,7 @@ use colored::Colorize;
 use walkdir::WalkDir;
 
 use cli_tools_common::date::Date;
-use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
+use cli_tools_common::{OverwritePolicy, PathChange, RenameOutcome, TargetReservations};
 
 pub use crate::config::Config;
 
@@ -30,7 +30,9 @@ struct RenameItem {
 }
 
 /// Flip date to start with year for all matching files from the given path.
-pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
+///
+/// Completed renames are appended to `changes`, so callers can update file indexes afterwards.
+pub fn date_flip_files(path: &PathBuf, config: &Config, changes: &mut Vec<PathChange>) -> Result<()> {
     let (files, _root) = files_to_rename(path, &config.file_extensions, config.recurse)?;
     if files.is_empty() {
         if config.verbose {
@@ -111,7 +113,7 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
         cli_tools_common::show_diff(&item.filename, &item.new_name);
     }
     if !config.dryrun {
-        execute_planned_renames(&planned, policy)?;
+        execute_planned_renames(&planned, policy, changes)?;
     }
 
     Ok(())
@@ -146,7 +148,13 @@ fn skip_blocked_renames(planned: &mut Vec<(RenameItem, PathBuf)>) {
 ///
 /// Stage sources that are also destinations in the batch under unique temporary sibling paths.
 /// On failure, restore pending sources whose original names are free.
-fn execute_planned_renames(planned: &[(RenameItem, PathBuf)], policy: OverwritePolicy) -> Result<()> {
+///
+/// Completed renames are appended to `changes` under the original source path.
+fn execute_planned_renames(
+    planned: &[(RenameItem, PathBuf)],
+    policy: OverwritePolicy,
+    changes: &mut Vec<PathChange>,
+) -> Result<()> {
     let mut active_targets = TargetReservations::new();
     for (_, target) in planned {
         active_targets.reserve(target);
@@ -182,7 +190,12 @@ fn execute_planned_renames(planned: &[(RenameItem, PathBuf)], policy: OverwriteP
                 }
                 eprintln!("{}", "File already exists".yellow());
             }
-            Ok(_) => *staged = None,
+            Ok(outcome) => {
+                *staged = None;
+                if matches!(outcome, RenameOutcome::Renamed | RenameOutcome::CaseRenamed) {
+                    changes.push(PathChange::moved_file(&item.path, new_path));
+                }
+            }
             Err(error) => return Err(recover_staged_sources(planned, &staged_sources, error)),
         }
     }
@@ -220,7 +233,9 @@ fn restore_staged_source(temporary: &Path, original: &Path) -> Result<()> {
 }
 
 /// Flip date to start with year for all matching directories from the given path.
-pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
+///
+/// Completed renames are appended to `changes`, so callers can update file indexes afterwards.
+pub fn date_flip_directories(path: PathBuf, config: &Config, changes: &mut Vec<PathChange>) -> Result<()> {
     let mut directories = directories_to_rename(path, config.recurse)?;
     // Renaming a parent first would leave the stored paths of its subdirectories pointing nowhere,
     // so the deepest directories are renamed first.
@@ -256,7 +271,10 @@ pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
                         format!("Directory already exists: {}", new_path.display()).yellow()
                     );
                 }
-                Ok(_) => {}
+                Ok(RenameOutcome::Renamed | RenameOutcome::CaseRenamed) => {
+                    changes.push(PathChange::moved_directory(&directory.path, &new_path));
+                }
+                Ok(RenameOutcome::Unchanged) => {}
                 Err(error) => {
                     failed_count += 1;
                     cli_tools_common::print_error!(
@@ -629,7 +647,7 @@ mod test_date_flip_files {
         fs::create_dir(&sub).expect("create sub");
         fs::write(sub.join("Report 31.12.2020.txt"), "report").expect("write");
 
-        date_flip_files(&root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+        date_flip_files(&root.path().to_path_buf(), &config(false), &mut Vec::new()).expect("flip should succeed");
 
         assert!(file_names(root.path()).is_empty(), "{:?}", file_names(root.path()));
         let renamed = file_names(&sub);
@@ -646,7 +664,7 @@ mod test_date_flip_files {
             fs::write(path.join("x 31.12.2020.txt"), content).expect("write");
         }
 
-        date_flip_files(&root.path().to_path_buf(), &config(true)).expect("flip should succeed");
+        date_flip_files(&root.path().to_path_buf(), &config(true), &mut Vec::new()).expect("flip should succeed");
 
         for (directory, content) in [("a", "A"), ("b", "B")] {
             let names = file_names(&root.path().join(directory));
@@ -663,7 +681,7 @@ mod test_date_flip_files {
         let target_name = Date::reorder_filename_date("x 31.12.2020.txt", false, false, false).expect("has a date");
         fs::write(root.path().join(&target_name), "existing").expect("write");
 
-        date_flip_files(&root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+        date_flip_files(&root.path().to_path_buf(), &config(false), &mut Vec::new()).expect("flip should succeed");
 
         assert_eq!(
             fs::read_to_string(root.path().join(&target_name)).expect("read"),
@@ -721,7 +739,7 @@ mod test_date_flip_directories {
         // The parent sorts before the child by name, so a name ordered run renames the parent first.
         fs::create_dir_all(root.path().join("A Trip 01.01.2020").join("B Day 31.12.2021")).expect("create");
 
-        date_flip_directories(root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+        date_flip_directories(root.path().to_path_buf(), &config(false), &mut Vec::new()).expect("flip should succeed");
 
         let names = directories(root.path());
         assert_eq!(names.len(), 2, "{names:?}");
@@ -741,7 +759,7 @@ mod test_date_flip_directories {
         fs::create_dir(root.path().join(&target)).expect("create target");
         fs::write(root.path().join(&target).join("keep.txt"), "keep").expect("write");
 
-        date_flip_directories(root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+        date_flip_directories(root.path().to_path_buf(), &config(false), &mut Vec::new()).expect("flip should succeed");
 
         assert!(root.path().join("Trip 01.01.2020").is_dir());
         assert_eq!(
@@ -795,12 +813,12 @@ mod test_nested_trees {
 
     /// Run file mode on the whole tree.
     fn flip_files(tree: &TempTree, config: &Config) {
-        date_flip_files(&tree.path().to_path_buf(), config).expect("flip should succeed");
+        date_flip_files(&tree.path().to_path_buf(), config, &mut Vec::new()).expect("flip should succeed");
     }
 
     /// Run directory mode on the whole tree.
     fn flip_directories(tree: &TempTree, config: &Config) {
-        date_flip_directories(tree.path().to_path_buf(), config).expect("flip should succeed");
+        date_flip_directories(tree.path().to_path_buf(), config, &mut Vec::new()).expect("flip should succeed");
     }
 
     /// Contents of every regular file in the tree, so a test can check that nothing was lost.
@@ -872,8 +890,12 @@ mod test_nested_trees {
     fn a_file_given_as_the_path_is_renamed_alone() {
         let tree = nested_files();
 
-        date_flip_files(&tree.join("a/Song 01.05.2021.mp3"), &file_config(false, false, false))
-            .expect("flip should succeed");
+        date_flip_files(
+            &tree.join("a/Song 01.05.2021.mp3"),
+            &file_config(false, false, false),
+            &mut Vec::new(),
+        )
+        .expect("flip should succeed");
 
         assert!(tree.exists("a/Song 2021.05.01.mp3"));
         assert!(tree.exists("Report 31.12.2020.txt"));
@@ -1052,8 +1074,10 @@ mod test_nested_trees {
             return;
         }
 
-        date_flip_files(&tree.join("walked"), &file_config(true, false, false)).expect("flip should succeed");
-        date_flip_directories(tree.join("walked"), &directory_config(true, false)).expect("flip should succeed");
+        date_flip_files(&tree.join("walked"), &file_config(true, false, false), &mut Vec::new())
+            .expect("flip should succeed");
+        date_flip_directories(tree.join("walked"), &directory_config(true, false), &mut Vec::new())
+            .expect("flip should succeed");
 
         assert_eq!(tree.read("outside/real 01.02.2020.txt"), "real");
         assert_eq!(tree.read("outside/folder/inner 01.02.2020.txt"), "inner");
@@ -1109,7 +1133,7 @@ mod test_nested_trees {
             })
             .collect::<Vec<_>>();
 
-        let error = execute_planned_renames(&planned, OverwritePolicy::Overwrite).unwrap_err();
+        let error = execute_planned_renames(&planned, OverwritePolicy::Overwrite, &mut Vec::new()).unwrap_err();
 
         assert!(error.to_string().contains("Failed to stage"), "{error:#}");
         assert_eq!(tree.snapshot(), before);
@@ -1141,5 +1165,128 @@ mod test_nested_trees {
 
         assert_eq!(tree.read("2023.12.05.jpg"), "A_content");
         assert_eq!(tree.read("2005.12.23.jpg"), "B_content");
+    }
+}
+
+#[cfg(test)]
+mod test_path_changes {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    fn file_config(dryrun: bool) -> Config {
+        Config {
+            dryrun,
+            file_extensions: FILE_EXTENSIONS.iter().map(ToString::to_string).collect(),
+            recurse: true,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn renamed_files_are_reported_under_their_original_paths() {
+        let tree = TempTree::new();
+        tree.file_with("Report 31.12.2020.txt", "report");
+        tree.file_with("a/Song 01.05.2021.mp3", "song");
+        tree.file_with("a/ok 2020.01.02.txt", "ok");
+        let mut changes = Vec::new();
+
+        date_flip_files(&tree.path().to_path_buf(), &file_config(false), &mut changes).unwrap();
+
+        changes.sort_by(|left, right| left.source().cmp(right.source()));
+        let mut expected = vec![
+            PathChange::moved_file(tree.join("Report 31.12.2020.txt"), tree.join("Report 2020.12.31.txt")),
+            PathChange::moved_file(
+                tree.join("a").join("Song 01.05.2021.mp3"),
+                tree.join("a").join("Song 2021.05.01.mp3"),
+            ),
+        ];
+        expected.sort_by(|left, right| left.source().cmp(right.source()));
+        assert_eq!(changes, expected);
+    }
+
+    #[test]
+    fn staged_cycle_renames_report_the_original_paths() {
+        let tree = TempTree::new();
+        let first = tree.file_with("a.txt", "a");
+        let second = tree.file_with("b.txt", "b");
+        let planned = vec![
+            (
+                RenameItem {
+                    path: first.clone(),
+                    filename: "a.txt".to_string(),
+                    new_name: "b.txt".to_string(),
+                },
+                second.clone(),
+            ),
+            (
+                RenameItem {
+                    path: second.clone(),
+                    filename: "b.txt".to_string(),
+                    new_name: "a.txt".to_string(),
+                },
+                first.clone(),
+            ),
+        ];
+        let mut changes = Vec::new();
+
+        execute_planned_renames(&planned, OverwritePolicy::Overwrite, &mut changes).unwrap();
+
+        assert_eq!(tree.read("a.txt"), "b");
+        assert_eq!(tree.read("b.txt"), "a");
+        assert_eq!(
+            changes,
+            vec![
+                PathChange::moved_file(&first, &second),
+                PathChange::moved_file(&second, &first)
+            ]
+        );
+    }
+
+    #[test]
+    fn dryrun_reports_no_changes() {
+        let tree = TempTree::new();
+        tree.file_with("Report 31.12.2020.txt", "report");
+        tree.dir("Trip 01.05.2021");
+        let mut changes = Vec::new();
+
+        date_flip_files(&tree.path().to_path_buf(), &file_config(true), &mut changes).unwrap();
+        date_flip_directories(
+            tree.path().to_path_buf(),
+            &Config {
+                directory_mode: true,
+                dryrun: true,
+                ..Config::default()
+            },
+            &mut changes,
+        )
+        .unwrap();
+
+        assert_eq!(changes, Vec::new());
+    }
+
+    #[test]
+    fn renamed_directories_are_reported_as_directory_moves() {
+        let tree = TempTree::new();
+        tree.file_with("Trip 01.05.2021/photo.jpg", "photo");
+        let mut changes = Vec::new();
+
+        date_flip_directories(
+            tree.path().to_path_buf(),
+            &Config {
+                directory_mode: true,
+                ..Config::default()
+            },
+            &mut changes,
+        )
+        .unwrap();
+
+        assert_eq!(
+            changes,
+            vec![PathChange::moved_directory(
+                tree.join("Trip 01.05.2021"),
+                tree.join("2021-05-01 Trip")
+            )]
+        );
     }
 }
