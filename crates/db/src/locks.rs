@@ -435,7 +435,7 @@ pub fn is_process_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
@@ -447,7 +447,8 @@ pub fn is_process_alive(pid: u32) -> bool {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
-                return false;
+                // A process the caller may not query, such as one of another user, still exists.
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
             let mut exit_code: u32 = 0;
             let ok = GetExitCodeProcess(handle, &raw mut exit_code) != 0;
@@ -644,6 +645,43 @@ fn current_hostname() -> String {
 }
 
 #[cfg(test)]
+mod test_process_liveness {
+    use super::*;
+
+    #[test]
+    fn current_process_is_alive() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_zero_is_never_alive() {
+        assert!(!is_process_alive(0));
+    }
+
+    #[test]
+    fn exited_child_process_is_not_alive() {
+        #[cfg(windows)]
+        let mut command = std::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "exit 0"]);
+        #[cfg(not(windows))]
+        let mut command = std::process::Command::new("true");
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        drop(child);
+        assert!(!is_process_alive(pid));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn protected_system_process_counts_as_alive() {
+        // The System process always runs as PID 4 and denies queries from user processes.
+        assert!(is_process_alive(4));
+    }
+}
+
+#[cfg(test)]
 mod test_active_locks {
     use super::*;
     use tempfile::TempDir;
@@ -716,18 +754,25 @@ mod test_active_locks {
         // Initialize schema once before concurrent workers race.
         let _init = ActiveLockStore::open_at(db_path.clone(), "init").unwrap();
 
+        // Every worker holds its outcome until all workers have tried,
+        // so a slow worker cannot acquire the lock after the winner has released it.
+        let worker_count = 8;
+        let all_attempted = Arc::new(std::sync::Barrier::new(worker_count));
         let acquired_count = Arc::new(AtomicU64::new(0));
         let mut handles = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..worker_count {
             let db_clone = db_path.clone();
             let file_clone = file.clone();
             let counter = Arc::clone(&acquired_count);
+            let barrier = Arc::clone(&all_attempted);
             handles.push(thread::spawn(move || {
                 let store = ActiveLockStore::open_at(db_clone, "vconvert").unwrap();
-                if let AcquireOutcome::Acquired(_guard) = store.try_acquire(&[file_clone], "convert").unwrap() {
+                let outcome = store.try_acquire(&[file_clone], "convert").unwrap();
+                if matches!(outcome, AcquireOutcome::Acquired(_)) {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    thread::sleep(Duration::from_millis(60));
                 }
+                barrier.wait();
+                drop(outcome);
             }));
         }
 
