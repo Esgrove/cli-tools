@@ -125,6 +125,9 @@ pub trait ConvertObserver: Sync {
     /// A rename failed.
     fn rename_failed(&self, from: &Path, error: &anyhow::Error) {}
 
+    /// A file was renamed to carry its codec label.
+    fn file_renamed(&self, from: &Path, to: &Path) {}
+
     /// All renames finished.
     fn renames_finished(&self, renamed_count: usize, total_count: usize, duration: Duration) {}
 
@@ -189,6 +192,9 @@ pub trait ConvertObserver: Sync {
 
     /// A replaced file is about to be removed.
     fn deleting(&self, path: &Path, method: DeleteMethod) {}
+
+    /// A replaced file was deleted or moved to the trash.
+    fn file_removed(&self, path: &Path) {}
 
     /// Removing a replaced or invalid file failed.
     fn delete_failed(&self, path: &Path, error: &anyhow::Error) {}

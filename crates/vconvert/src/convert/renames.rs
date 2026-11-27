@@ -73,6 +73,7 @@ impl VideoConvert<'_> {
                 Ok(RenameOutcome::SkippedExisting) => self.observer.rename_skipped_existing(&file.output_path),
                 Ok(_) => {
                     renamed_count += 1;
+                    self.observer.file_renamed(&file.file.path, &file.output_path);
                     let _ = database.move_cached_path(&file.file.path, &file.output_path);
                 }
                 Err(error) => {
@@ -175,5 +176,80 @@ mod test_process_renames {
             ),
             (0, 1)
         );
+    }
+}
+
+#[cfg(test)]
+mod test_rename_events {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use super::super::test_helpers::processable;
+    use super::*;
+    use crate::observer::ConvertObserver;
+    use crate::options::ConvertOptions;
+
+    /// Observer that records completed renames.
+    #[derive(Default)]
+    struct RenameRecorder {
+        renamed: Mutex<Vec<(PathBuf, PathBuf)>>,
+    }
+
+    impl ConvertObserver for RenameRecorder {
+        fn file_renamed(&self, from: &Path, to: &Path) {
+            self.renamed
+                .lock()
+                .unwrap()
+                .push((from.to_path_buf(), to.to_path_buf()));
+        }
+    }
+
+    #[test]
+    fn completed_renames_are_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let path = directory.path().join("Movie.mp4");
+        std::fs::write(&path, b"video").unwrap();
+        let file = processable(&path, "hevc");
+        let output = file.output_path.clone();
+        let recorder = RenameRecorder::default();
+        let converter = VideoConvert::new(ConvertOptions::default(), &recorder);
+
+        converter.process_renames(&[file], &AtomicBool::new(false), &mut database, None);
+
+        assert_eq!(*recorder.renamed.lock().unwrap(), vec![(path, output)]);
+    }
+
+    #[test]
+    fn dry_run_and_skipped_renames_are_not_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let path = directory.path().join("Movie.mp4");
+        std::fs::write(&path, b"video").unwrap();
+        let file = processable(&path, "hevc");
+        std::fs::write(&file.output_path, b"existing").unwrap();
+        let recorder = RenameRecorder::default();
+
+        VideoConvert::new(
+            ConvertOptions {
+                dry_run: true,
+                ..ConvertOptions::default()
+            },
+            &recorder,
+        )
+        .process_renames(
+            std::slice::from_ref(&file),
+            &AtomicBool::new(false),
+            &mut database,
+            None,
+        );
+        VideoConvert::new(ConvertOptions::default(), &recorder).process_renames(
+            &[file],
+            &AtomicBool::new(false),
+            &mut database,
+            None,
+        );
+
+        assert_eq!(*recorder.renamed.lock().unwrap(), Vec::new());
     }
 }

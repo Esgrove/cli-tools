@@ -22,6 +22,7 @@ impl VideoConvert<'_> {
             self.observer.deleting(path, DeleteMethod::Trash);
             cli_tools_common::move_to_trash(path).context("Failed to move original file to trash")?;
         }
+        self.observer.file_removed(path);
         Ok(())
     }
 
@@ -85,4 +86,58 @@ fn hidden_backup_path(input: &Path) -> Result<PathBuf> {
     let path = placeholder.path().to_path_buf();
     drop(placeholder);
     Ok(path)
+}
+
+#[cfg(test)]
+mod test_removal_events {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::observer::ConvertObserver;
+    use crate::options::ConvertOptions;
+
+    /// Observer that records removed files.
+    #[derive(Default)]
+    struct RemovalRecorder {
+        removed: Mutex<Vec<PathBuf>>,
+    }
+
+    impl ConvertObserver for RemovalRecorder {
+        fn file_removed(&self, path: &Path) {
+            self.removed.lock().unwrap().push(path.to_path_buf());
+        }
+    }
+
+    fn deleting_converter(recorder: &RemovalRecorder) -> VideoConvert<'_> {
+        VideoConvert::new(
+            ConvertOptions {
+                delete: true,
+                ..ConvertOptions::default()
+            },
+            recorder,
+        )
+    }
+
+    #[test]
+    fn deleted_files_are_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.avi");
+        std::fs::write(&path, b"video").unwrap();
+        let recorder = RemovalRecorder::default();
+
+        deleting_converter(&recorder).delete_file(&path).unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(*recorder.removed.lock().unwrap(), vec![path]);
+    }
+
+    #[test]
+    fn failed_deletions_are_not_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let recorder = RemovalRecorder::default();
+
+        deleting_converter(&recorder).delete_file_reporting_failure(&directory.path().join("missing.avi"));
+
+        assert_eq!(*recorder.removed.lock().unwrap(), Vec::<PathBuf>::new());
+    }
 }
