@@ -223,8 +223,17 @@ impl Daemon {
             self.ipc_state.update_from_database(database);
         }
 
-        // Perform initial scan if requested or if database is empty
-        if self.options.rescan || self.should_perform_initial_scan()? {
+        // Arm the file watcher before walking so changes during startup scans are buffered and replayed.
+        let non_ntfs_paths = self.get_non_ntfs_paths();
+        if !non_ntfs_paths.is_empty()
+            && let Err(error) = self.start_file_watcher(non_ntfs_paths)
+        {
+            warn!("Failed to start file watcher before initial scan: {error:#}");
+        }
+
+        // Perform initial scan if requested, if the database is empty, or to reconcile walked roots on restart.
+        let has_walked_roots = !self.get_non_ntfs_paths().is_empty();
+        if self.options.rescan || self.should_perform_initial_scan()? || has_walked_roots {
             info!("Performing scan");
             self.ipc_state.state.store(DaemonStateInfo::Scanning);
 
@@ -239,10 +248,10 @@ impl Daemon {
             }
         }
 
-        // Build path cache for USN path resolution
+        // Build path cache for USN and volume path resolution
         self.build_path_cache()?;
 
-        // Start monitoring
+        // Start USN monitors (and retry file watcher if it failed above)
         self.start_monitors();
         self.last_periodic_scan = Instant::now();
 
@@ -436,15 +445,16 @@ impl Daemon {
             }
         }
         let non_ntfs_paths = self.get_non_ntfs_paths();
-        if let Some(watcher) = self.file_watcher.take() {
-            watcher.stop();
-        }
-        self.watcher_receiver = None;
-        if !non_ntfs_paths.is_empty()
+        // Keep a healthy file watcher alive across scans so events queued during the walk are retained and replayed.
+        if self.file_watcher.is_none()
+            && !non_ntfs_paths.is_empty()
             && let Err(error) = self.start_file_watcher(non_ntfs_paths)
         {
-            warn!("File watcher could not restart: {error:#}");
+            warn!("File watcher could not start: {error:#}");
             failed_monitors += 1;
+        }
+        if let Some(ref database) = self.database {
+            self.ipc_state.update_from_database(database);
         }
         self.update_monitored_volumes_count();
         result?;
@@ -482,13 +492,15 @@ impl Daemon {
             }
         }
 
-        // Start file watcher for non-NTFS paths
-        let non_ntfs_paths = self.get_non_ntfs_paths();
-        if !non_ntfs_paths.is_empty()
-            && let Err(error) = self.start_file_watcher(non_ntfs_paths)
-        {
-            warn!("File watcher could not start, will retry: {error:#}");
-            self.recovery_pending = true;
+        // Start file watcher for non-NTFS paths if not already armed before the initial scan.
+        if self.file_watcher.is_none() {
+            let non_ntfs_paths = self.get_non_ntfs_paths();
+            if !non_ntfs_paths.is_empty()
+                && let Err(error) = self.start_file_watcher(non_ntfs_paths)
+            {
+                warn!("File watcher could not start, will retry: {error:#}");
+                self.recovery_pending = true;
+            }
         }
     }
 
@@ -689,7 +701,7 @@ impl Daemon {
             }
         }
 
-        self.process_watcher_events();
+        needs_rescan |= self.process_watcher_events();
         needs_rescan
     }
 
@@ -741,7 +753,7 @@ impl Daemon {
         true
     }
 
-    fn process_watcher_events(&mut self) {
+    fn process_watcher_events(&mut self) -> bool {
         let mut watcher_events: Vec<FileChangeEvent> = Vec::new();
         if let Some(ref mut receiver) = self.watcher_receiver {
             while let Ok(event) = receiver.try_recv() {
@@ -749,9 +761,20 @@ impl Daemon {
             }
         }
 
-        for event in watcher_events {
-            self.handle_change_event(event);
+        if watcher_events.is_empty() {
+            return false;
         }
+
+        let mut needs_rescan = false;
+        for event in watcher_events {
+            needs_rescan |= !self.handle_change_event_with_reference(event, None);
+        }
+
+        if let Some(ref database) = self.database {
+            self.ipc_state.update_from_database(database);
+        }
+
+        needs_rescan
     }
 
     fn apply_usn_deletions(&self, deletions_by_drive: &HashMap<char, Vec<u64>>) -> bool {
@@ -887,6 +910,7 @@ impl Daemon {
     }
 
     /// Handle a file change event by updating the database.
+    #[cfg(test)]
     fn handle_change_event(&self, event: FileChangeEvent) {
         let _ = self.handle_change_event_with_reference(event, None);
     }
@@ -897,91 +921,210 @@ impl Daemon {
         };
 
         match event {
-            FileChangeEvent::Created(path) => {
-                debug!("File created: {}", path.display());
+            FileChangeEvent::Created(path) => self.handle_created_event(db, &path, file_reference),
+            FileChangeEvent::Modified(path) => self.handle_modified_event(db, &path, file_reference),
+            FileChangeEvent::Deleted(path) => Self::handle_deleted_event(db, &path),
+            FileChangeEvent::Renamed { from, to } => self.handle_renamed_event(db, &from, &to, file_reference),
+        }
+    }
 
-                // Get volume_id from drive letter
-                let Some(volume_id) = self.get_volume_id_for_path(&path) else {
-                    trace!("No volume found for path: {}", path.display());
+    /// Index a newly created file or populated directory tree.
+    fn handle_created_event(&self, db: &Database, path: &Path, file_reference: Option<u64>) -> bool {
+        debug!("File created: {}", path.display());
+        let Some(path_str) = path.to_str() else {
+            warn!("Skipping non-UTF-8 created path: {}", path.display());
+            return true;
+        };
+        if !self.should_index_path(path_str) {
+            return true;
+        }
+
+        let Some(volume_id) = self.get_volume_id_for_path(path) else {
+            trace!("No volume found for path: {}", path.display());
+            return false;
+        };
+
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return true;
+        };
+        let mut entry = FileEntry::from_metadata(volume_id, path, &metadata);
+        entry.mft_reference = file_reference;
+
+        if let Err(error) = db.insert_file(&entry) {
+            error!("Failed to insert file {}: {}", path.display(), error);
+            return false;
+        }
+
+        !metadata.is_dir() || self.index_directory_descendants(db, volume_id, path)
+    }
+
+    /// Refresh metadata for a modified entry, or delete it if it is already gone.
+    fn handle_modified_event(&self, db: &Database, path: &Path, file_reference: Option<u64>) -> bool {
+        debug!("File modified: {}", path.display());
+        let Some(path_str) = path.to_str() else {
+            warn!("Skipping non-UTF-8 modified path: {}", path.display());
+            return true;
+        };
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                if !self.should_index_path(path_str) {
+                    return true;
+                }
+                let Some(volume_id) = self.get_volume_id_for_path(path) else {
+                    trace!("No volume found for modified path: {}", path.display());
                     return false;
                 };
-
-                // Get file metadata and insert into database
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    let mut entry = FileEntry::from_metadata(volume_id, &path, &metadata);
-                    entry.mft_reference = file_reference;
-
-                    if let Err(error) = db.insert_file(&entry) {
-                        error!("Failed to insert file {}: {}", path.display(), error);
-                        return false;
-                    }
+                let mut entry = FileEntry::from_metadata(volume_id, path, &metadata);
+                entry.mft_reference = file_reference;
+                if let Err(error) = db.insert_file(&entry) {
+                    error!("Failed to update modified file {}: {}", path.display(), error);
+                    return false;
                 }
+                true
             }
-            FileChangeEvent::Modified(path) => {
-                debug!("File modified: {}", path.display());
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::handle_deleted_event(db, path),
+            Err(_) => true,
+        }
+    }
+
+    /// Remove a deleted file or directory subtree from the index.
+    fn handle_deleted_event(db: &Database, path: &Path) -> bool {
+        debug!("File deleted: {}", path.display());
+        let path_str = path.to_string_lossy();
+        let is_directory = match db.get_file_by_path(&path_str) {
+            Ok(entry) => entry.is_some_and(|entry| entry.is_directory),
+            Err(error) => {
+                error!("Failed to look up deleted path {}: {}", path.display(), error);
+                return false;
             }
-            FileChangeEvent::Deleted(path) => {
-                debug!("File deleted: {}", path.display());
+        };
+        let result = if is_directory {
+            db.delete_files_under_path(&path_str).map(|_| ())
+        } else {
+            db.delete_file_by_path(&path_str).map(|_| ())
+        };
+        if let Err(error) = result {
+            error!("Failed to delete {}: {}", path.display(), error);
+            return false;
+        }
+        true
+    }
 
-                let path_str = path.to_string_lossy();
-                let is_directory = match db.get_file_by_path(&path_str) {
-                    Ok(entry) => entry.is_some_and(|entry| entry.is_directory),
-                    Err(error) => {
-                        error!("Failed to look up deleted path {}: {}", path.display(), error);
-                        return false;
-                    }
-                };
-                // A deleted directory takes everything indexed under it along.
-                let result = if is_directory {
-                    db.delete_files_under_path(&path_str).map(|_| ())
-                } else {
-                    db.delete_file_by_path(&path_str).map(|_| ())
-                };
-                if let Err(error) = result {
-                    error!("Failed to delete {}: {}", path.display(), error);
-                    return false;
-                }
+    /// Update the index for a renamed file or directory, walking incoming directories if needed.
+    fn handle_renamed_event(&self, db: &Database, from: &Path, to: &Path, file_reference: Option<u64>) -> bool {
+        debug!("File renamed: {} -> {}", from.display(), to.display());
+
+        let from_str = from.to_string_lossy();
+        let previous = match db.get_file_by_path(&from_str) {
+            Ok(previous) => previous,
+            Err(error) => {
+                error!("Failed to look up renamed path {}: {}", from.display(), error);
+                return false;
             }
-            FileChangeEvent::Renamed { from, to } => {
-                debug!("File renamed: {} -> {}", from.display(), to.display());
+        };
+        let to_str = to.to_string_lossy();
+        if !self.should_index_path(&to_str) {
+            let is_directory = previous.is_some_and(|entry| entry.is_directory);
+            let result = if is_directory {
+                db.delete_files_under_path(&from_str).map(|_| ())
+            } else {
+                db.delete_file_by_path(&from_str).map(|_| ())
+            };
+            if let Err(error) = result {
+                error!(
+                    "Failed to remove out-of-scope renamed path {}: {}",
+                    from.display(),
+                    error
+                );
+                return false;
+            }
+            return true;
+        }
 
-                let from_str = from.to_string_lossy();
-                let previous = match db.get_file_by_path(&from_str) {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        error!("Failed to look up renamed path {}: {}", from.display(), error);
-                        return false;
-                    }
-                };
-                if previous.is_some_and(|entry| entry.is_directory) {
-                    return Self::rename_indexed_directory(db, &from, &to);
-                }
+        if previous.is_some_and(|entry| entry.is_directory) {
+            return Self::rename_indexed_directory(db, from, to);
+        }
 
-                // Delete old entry
-                if let Err(error) = db.delete_file_by_path(&from_str) {
-                    error!("Failed to delete old path {}: {}", from.display(), error);
-                    return false;
-                }
+        if let Err(error) = db.delete_file_by_path(&from_str) {
+            error!("Failed to delete old path {}: {}", from.display(), error);
+            return false;
+        }
 
-                // Get volume_id from drive letter
-                let Some(volume_id) = self.get_volume_id_for_path(&to) else {
-                    trace!("No volume found for renamed path: {}", to.display());
-                    return false;
-                };
+        let Some(volume_id) = self.get_volume_id_for_path(to) else {
+            trace!("No volume found for renamed path: {}", to.display());
+            return false;
+        };
 
-                // Insert new entry
-                if let Ok(metadata) = std::fs::metadata(&to) {
-                    let mut entry = FileEntry::from_metadata(volume_id, &to, &metadata);
-                    entry.mft_reference = file_reference;
+        if let Ok(metadata) = std::fs::metadata(to) {
+            let mut entry = FileEntry::from_metadata(volume_id, to, &metadata);
+            entry.mft_reference = file_reference;
 
-                    if let Err(error) = db.insert_file(&entry) {
-                        error!("Failed to insert renamed file {}: {}", to.display(), error);
-                        return false;
-                    }
-                }
+            if let Err(error) = db.insert_file(&entry) {
+                error!("Failed to insert renamed file {}: {}", to.display(), error);
+                return false;
+            }
+            if metadata.is_dir() && !self.index_directory_descendants(db, volume_id, to) {
+                return false;
             }
         }
         true
+    }
+
+    /// Walk and index all in-scope descendants of a newly arrived or renamed directory.
+    fn index_directory_descendants(&self, db: &Database, volume_id: i64, root_dir: &Path) -> bool {
+        let mut stack = vec![root_dir.to_path_buf()];
+        let mut batch = Vec::new();
+        let mut ok = true;
+
+        while let Some(current_dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&current_dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    warn!("Could not walk incoming directory {}: {}", current_dir.display(), error);
+                    ok = false;
+                    continue;
+                }
+            };
+
+            for entry_result in entries {
+                let Ok(dir_entry) = entry_result else {
+                    ok = false;
+                    continue;
+                };
+                let child_path = dir_entry.path();
+                let Some(child_str) = child_path.to_str() else {
+                    warn!(
+                        "Skipping non-UTF-8 path in incoming directory: {}",
+                        child_path.display()
+                    );
+                    continue;
+                };
+                if !self.should_index_path(child_str) {
+                    continue;
+                }
+                let Ok(metadata) = dir_entry.metadata() else {
+                    continue;
+                };
+                let is_dir = metadata.is_dir();
+                batch.push(FileEntry::from_metadata(volume_id, &child_path, &metadata));
+                if is_dir {
+                    stack.push(child_path);
+                }
+            }
+        }
+
+        for entry in &batch {
+            if let Err(error) = db.insert_file(entry) {
+                error!(
+                    "Failed to index descendant {} of incoming directory {}: {}",
+                    entry.full_path,
+                    root_dir.display(),
+                    error
+                );
+                return false;
+            }
+        }
+        ok
     }
 
     /// Move an indexed directory and every entry under it to the renamed path in one transaction.
@@ -3522,5 +3665,173 @@ mod test_multi_root_ownership {
         assert!(!daemon.should_index_path("/data/work/.hidden"));
         assert!(!daemon.should_index_path("/data/work/target/debug"));
         assert!(!daemon.should_index_path("/data/work-extra/main.rs"));
+    }
+}
+
+#[cfg(test)]
+mod test_watcher_event_reconciliation {
+    use std::fs;
+
+    use filefind_common::types::{IndexedVolume, VolumeType};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn modified_event_refreshes_size_and_deletes_vanished_file() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let file_path = root.join("notes.txt");
+        fs::write(&file_path, "hi").unwrap();
+
+        let mut config = Config::default();
+        config.daemon.paths = vec![root.to_string_lossy().into_owned()];
+        let mut daemon = Daemon::new(config, DaemonOptions::default());
+        let database = Database::open_in_memory().unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume::new(
+                "MOD-VOL".into(),
+                root.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        database
+            .insert_file(&FileEntry {
+                id: None,
+                volume_id,
+                parent_id: None,
+                name: "notes.txt".into(),
+                full_path: file_path.to_string_lossy().into_owned(),
+                is_directory: false,
+                size: 2,
+                created_time: None,
+                modified_time: None,
+                mft_reference: None,
+            })
+            .unwrap();
+        daemon.database = Some(database);
+        daemon.build_path_cache().unwrap();
+
+        fs::write(&file_path, "much longer updated contents").unwrap();
+        assert!(daemon.handle_change_event_with_reference(FileChangeEvent::Modified(file_path.clone()), None));
+
+        let updated = daemon
+            .database
+            .as_ref()
+            .unwrap()
+            .get_file_by_path(&file_path.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.size, 28);
+
+        fs::remove_file(&file_path).unwrap();
+        assert!(daemon.handle_change_event_with_reference(FileChangeEvent::Modified(file_path.clone()), None));
+        assert!(
+            daemon
+                .database
+                .as_ref()
+                .unwrap()
+                .get_file_by_path(&file_path.to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn created_directory_event_indexes_nested_descendants_and_respects_exclusions() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let incoming = root.join("incoming");
+        fs::create_dir_all(incoming.join("sub")).unwrap();
+        fs::write(incoming.join("a.txt"), "alpha").unwrap();
+        fs::write(incoming.join("sub/b.txt"), "beta").unwrap();
+        fs::write(incoming.join("ignored.tmp"), "skip").unwrap();
+        fs::write(incoming.join(".hidden"), "skip").unwrap();
+
+        let mut config = Config::default();
+        config.daemon.paths = vec![root.to_string_lossy().into_owned()];
+        config.daemon.exclude_patterns = vec!["*.tmp".into()];
+        let mut daemon = Daemon::new(config, DaemonOptions::default());
+        let database = Database::open_in_memory().unwrap();
+        database
+            .upsert_volume(&IndexedVolume::new(
+                "INCOMING-VOL".into(),
+                root.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        daemon.database = Some(database);
+        daemon.build_path_cache().unwrap();
+
+        assert!(daemon.handle_change_event_with_reference(FileChangeEvent::Created(incoming.clone()), None));
+
+        let db = daemon.database.as_ref().unwrap();
+        assert!(db.get_file_by_path(&incoming.to_string_lossy()).unwrap().is_some());
+        assert!(
+            db.get_file_by_path(&incoming.join("a.txt").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_file_by_path(&incoming.join("sub").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_file_by_path(&incoming.join("sub/b.txt").to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_file_by_path(&incoming.join("ignored.tmp").to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.get_file_by_path(&incoming.join(".hidden").to_string_lossy())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_watcher_event_requests_reconciliation_and_success_refreshes_ipc_counts() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let good_file = root.join("good.txt");
+        fs::write(&good_file, "ok").unwrap();
+
+        let mut config = Config::default();
+        config.daemon.paths = vec![root.to_string_lossy().into_owned()];
+        let mut daemon = Daemon::new(config, DaemonOptions::default());
+        let database = Database::open_in_memory().unwrap();
+        database
+            .upsert_volume(&IndexedVolume::new(
+                "IPC-COUNT-VOL".into(),
+                root.to_string_lossy().into_owned(),
+                VolumeType::Local,
+            ))
+            .unwrap();
+        daemon.database = Some(database);
+        daemon.build_path_cache().unwrap();
+
+        let (sender, receiver) = mpsc::channel(8);
+        sender.try_send(FileChangeEvent::Created(good_file)).unwrap();
+        daemon.watcher_receiver = Some(receiver);
+
+        assert!(!daemon.process_watcher_events());
+        assert_eq!(daemon.ipc_state.get_status().indexed_files, 1);
+
+        // Sending a created event for an unindexed volume fails application and requests reconciliation.
+        let mut orphan_daemon = Daemon::new(Config::default(), DaemonOptions::default());
+        orphan_daemon.database = Some(Database::open_in_memory().unwrap());
+        let (orphan_tx, orphan_rx) = mpsc::channel(8);
+        orphan_tx
+            .try_send(FileChangeEvent::Created(PathBuf::from("/unindexed/file.txt")))
+            .unwrap();
+        orphan_daemon.watcher_receiver = Some(orphan_rx);
+        assert!(orphan_daemon.process_watcher_events());
     }
 }

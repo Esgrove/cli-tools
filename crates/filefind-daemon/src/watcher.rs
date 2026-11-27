@@ -181,6 +181,10 @@ impl FileWatcher {
 
             match res {
                 Ok(event) => {
+                    if event.need_rescan() {
+                        warn!("File watcher reported overflow or rescan flag, requesting reconciliation");
+                        rescan_needed.store(true, Ordering::Release);
+                    }
                     // Use blocking send since we're in a sync callback
                     if notify_tx.blocking_send(event).is_err() {
                         rescan_needed.store(true, Ordering::Release);
