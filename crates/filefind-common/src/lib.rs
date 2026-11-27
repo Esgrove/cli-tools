@@ -20,12 +20,14 @@ use windows_sys::Win32::System::Registry::{
 
 pub mod config;
 pub mod database;
+pub mod index_updates;
 #[cfg(feature = "ipc")]
 pub mod ipc;
 pub mod types;
 
 pub use config::{CONFIG_PATH, CONFIG_PATH_ENV, LogLevel, PathMapping, UserConfig as Config};
 pub use database::{Database, VolumeStats};
+pub use index_updates::{IndexUpdateReport, IndexUpdater};
 #[cfg(feature = "ipc")]
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,

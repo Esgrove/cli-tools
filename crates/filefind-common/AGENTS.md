@@ -15,6 +15,7 @@ The other filefind crates have their own `AGENTS.md`:
 - `config.rs` - User configuration file handling
 - `database.rs` - `SQLite` index database operations
 - `database/schema.rs` - Versioned index schema, migrated as the `filefind_index` component of `cli-tools-db`
+- `index_updates.rs` - `IndexUpdater`, which applies the moves and removals other tools report as `PathChange`
 - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
 - `types.rs` - File entries, volumes, and file change events
 
@@ -65,3 +66,11 @@ Remember to update the example config file when adding new config options.
 - `show_hidden` - Show hidden files in results
 - `hyperlinks` - Emit OSC 8 terminal hyperlinks: "auto", "always", or "never"
 - `hyperlink_scheme` - URI scheme used for hyperlinks, "file" by default
+
+## Index updates from other tools
+
+cli-tools tools that rename, move, or delete files report them as `cli_tools_common::PathChange`
+and apply them with `IndexUpdater::open_default()` at the end of a run.
+The updater only moves and removes entries that are already indexed and never adds new ones,
+since the daemon's exclude rules decide what belongs in the index.
+A move out of the configured `paths` removes the entries, and a change the daemon already applied changes nothing.

@@ -279,6 +279,7 @@ A binary only crate keeps its binary in `src/main.rs`.
       and by the tools that update the index:
         - `config.rs` - The `filefind.toml` user config with the daemon and CLI sections
         - `database.rs` - `SQLite` index database with volumes and files keyed by full path
+        - `index_updates.rs` - `IndexUpdater` applying the moves and removals tools report as `PathChange`
         - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
         - `types.rs` - File entries, volumes, and file change events
     - `crates/filefind-cli/` → `filefind` - Search the index, find duplicates, and move matching files
