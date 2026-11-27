@@ -462,3 +462,41 @@ fn moves_and_unpacks_update_an_index_seeded_through_a_symlink_root() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn force_move_of_hard_linked_file_removes_source_and_updates_index() {
+    let tree = TempTree::new();
+    tree.file_with("Library/Show Alpha/Show.Alpha.S01E01.mkv", "same inode bytes");
+    std::fs::hard_link(
+        tree.join("Library/Show Alpha/Show.Alpha.S01E01.mkv"),
+        tree.join("Library/Show.Alpha.S01E01.mkv"),
+    )
+    .expect("hard link should be created");
+    let home = TempTree::new();
+    let index = IndexFixture::create(
+        &home.join("filefind.db"),
+        tree.path(),
+        &[
+            tree.join("Library/Show Alpha"),
+            tree.join("Library/Show Alpha/Show.Alpha.S01E01.mkv"),
+            tree.join("Library/Show.Alpha.S01E01.mkv"),
+        ],
+    );
+
+    let output = run_dirmove(home.path(), &["--auto", "--force"], &tree.join("Library"));
+
+    assert_success(&output);
+    assert!(
+        !tree.exists("Library/Show.Alpha.S01E01.mkv"),
+        "hard-linked source must be removed on POSIX force overwrite"
+    );
+    assert_eq!(
+        tree.read("Library/Show Alpha/Show.Alpha.S01E01.mkv"),
+        "same inode bytes"
+    );
+    assert_eq!(
+        index.indexed_paths(),
+        vec!["Library/Show Alpha", "Library/Show Alpha/Show.Alpha.S01E01.mkv",]
+    );
+}

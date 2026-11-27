@@ -254,8 +254,13 @@ fn move_single_file(
     observer: &mut impl MoveObserver,
 ) -> anyhow::Result<()> {
     // This returns an error for cross-drive moves, which then fall back to the custom copy path.
-    match fs::rename(source, destination) {
-        Ok(()) => {
+    let policy = if overwrite {
+        cli_tools_common::OverwritePolicy::Overwrite
+    } else {
+        cli_tools_common::OverwritePolicy::Error
+    };
+    match cli_tools_common::safe_rename(source, destination, policy) {
+        Ok(_) => {
             observer.on_progress(expected_size);
             return Ok(());
         }
