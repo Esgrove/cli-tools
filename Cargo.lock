@@ -674,6 +674,7 @@ dependencies = [
  "cli-tools-common",
  "cli-tools-dots",
  "colored",
+ "filefind-common",
  "proptest",
  "regex",
  "reqwest",

@@ -7,17 +7,20 @@ use std::process::Output;
 
 use cli_tools_common::test_support::TempTree;
 use cli_tools_qtorrent::torrent::{Info, Torrent};
+use filefind_common::test_support::IndexFixture;
 use serde_bytes::ByteBuf;
 use test_server::{route, serve, serve_with};
 use tokio::process::Command;
 
-/// Run the CLI against the test server with no real user configuration or proxy.
+/// Run the CLI against the test server with no real user configuration, proxy, or host filefind index.
 async fn run(tree: &TempTree, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_qtorrent"))
         .arg(tree.dir("torrents"))
         .args(arguments)
         .env("HOME", tree.dir("home"))
         .env("USERPROFILE", tree.join("home"))
+        .env("FILEFIND_DB", tree.join("home/filefind.db"))
+        .env("FILEFIND_CONFIG", tree.join("home/filefind.toml"))
         .env("NO_PROXY", "127.0.0.1")
         .env("no_proxy", "127.0.0.1")
         .env("CLI_TOOLS_CONFIG", "")
@@ -113,4 +116,78 @@ async fn an_offline_preview_with_only_malformed_inputs_exits_unsuccessfully() {
 
     assert!(String::from_utf8_lossy(&output.stdout).contains("No valid torrents to add"));
     assert!(!output.status.success(), "{output:?}");
+}
+
+#[tokio::test]
+async fn archiving_added_torrents_updates_an_existing_filefind_index_with_collision_suffix() {
+    let tree = TempTree::new();
+    write_torrent(&tree, "Movie");
+    // Place a different file with the same name in downloaded/ to trigger collision-resolved naming.
+    tree.file_with("torrents/downloaded/Movie.torrent", "other torrent bytes");
+
+    let index = IndexFixture::create(
+        &tree.join("home/filefind.db"),
+        tree.path(),
+        &[
+            tree.join("torrents/Movie.torrent"),
+            tree.join("torrents/downloaded/Movie.torrent"),
+        ],
+    );
+
+    let port = serve(vec![
+        route("/api/v2/auth/login", 200, "Ok."),
+        route("/api/v2/auth/logout", 200, ""),
+        route("/api/v2/app/version", 200, "v5.0.0"),
+        route("/api/v2/app/webapiVersion", 200, "2.11.2"),
+        route("/api/v2/torrents/info", 200, "[]"),
+        route("/api/v2/torrents/add", 200, "Ok."),
+    ])
+    .await;
+
+    let output = run_connected(&tree, port).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(!tree.exists("torrents/Movie.torrent"));
+    assert!(tree.exists("torrents/downloaded/Movie.torrent"));
+    assert!(tree.exists("torrents/downloaded/Movie.1.torrent"));
+    assert_eq!(
+        index.indexed_paths(),
+        vec![
+            "torrents/downloaded/Movie.1.torrent",
+            "torrents/downloaded/Movie.torrent",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn dryrun_and_missing_index_do_not_modify_or_create_the_filefind_index() {
+    let tree = TempTree::new();
+    write_torrent(&tree, "Preview");
+    tree.dir("torrents/downloaded");
+
+    // Without an index database, a real add must not create one.
+    let port = serve(vec![
+        route("/api/v2/auth/login", 200, "Ok."),
+        route("/api/v2/auth/logout", 200, ""),
+        route("/api/v2/app/version", 200, "v5.0.0"),
+        route("/api/v2/app/webapiVersion", 200, "2.11.2"),
+        route("/api/v2/torrents/info", 200, "[]"),
+        route("/api/v2/torrents/add", 200, "Ok."),
+    ])
+    .await;
+    let output = run_connected(&tree, port).await;
+    assert!(output.status.success(), "{output:?}");
+    assert!(!tree.exists("home/filefind.db"));
+
+    // With an existing index, dry-run must leave it untouched.
+    let tree_dry = TempTree::new();
+    write_torrent(&tree_dry, "Preview");
+    tree_dry.dir("torrents/downloaded");
+    let index = IndexFixture::create(
+        &tree_dry.join("home/filefind.db"),
+        tree_dry.path(),
+        &[tree_dry.join("torrents/Preview.torrent")],
+    );
+    let output = run(&tree_dry, &["--offline", "--dryrun", "--yes"]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(index.indexed_paths(), vec!["torrents/Preview.torrent"]);
 }

@@ -95,12 +95,28 @@ impl QTorrent {
     }
 
     /// Run the add workflow with the supplied confirmation and trash handlers for archive collisions.
-    #[allow(clippy::too_many_lines)]
     async fn add_torrents_with_collision_handlers(
         &self,
         torrents: Vec<TorrentInfo>,
         confirm_collision: impl Fn(&Path, &str) -> Result<bool>,
-        mut trash_duplicate: impl FnMut(&Path),
+        trash_duplicate: impl FnMut(&Path) -> bool,
+    ) -> Result<TorrentStats> {
+        let mut index_changes = Vec::new();
+        let result = self
+            .process_torrents_with_handlers(torrents, confirm_collision, trash_duplicate, &mut index_changes)
+            .await;
+        update_filefind_index(&index_changes);
+        result
+    }
+
+    /// Execute the torrent add loop while recording completed local `.torrent` moves and removals.
+    #[allow(clippy::too_many_lines)]
+    async fn process_torrents_with_handlers(
+        &self,
+        torrents: Vec<TorrentInfo>,
+        confirm_collision: impl Fn(&Path, &str) -> Result<bool>,
+        mut trash_duplicate: impl FnMut(&Path) -> bool,
+        index_changes: &mut Vec<cli_tools_common::PathChange>,
     ) -> Result<TorrentStats> {
         let mut client = client::connect(&self.config.connection, self.config.verbose).await?;
         let adder = TorrentAdder::new(&client, &self.config.add_options, &self.names);
@@ -164,8 +180,8 @@ impl QTorrent {
                 {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
-                    if utils::is_duplicate_torrent_file(&torrent_path, existing) {
-                        trash_duplicate(&torrent_path);
+                    if utils::is_duplicate_torrent_file(&torrent_path, existing) && trash_duplicate(&torrent_path) {
+                        index_changes.push(cli_tools_common::PathChange::removed_file(torrent_path.clone()));
                     }
                     continue;
                 }
@@ -187,7 +203,7 @@ impl QTorrent {
 
                 // The torrent already exists in qBittorrent, so the torrent file has been processed
                 if let Some(directory) = downloaded_directory.as_deref() {
-                    move_torrent_file(&torrent_path, directory);
+                    move_torrent_file(&torrent_path, directory, index_changes);
                 }
                 continue;
             }
@@ -198,8 +214,8 @@ impl QTorrent {
                     stats.inc_skipped();
                     // Only an identical copy of the downloaded torrent is a duplicate.
                     // A different torrent that happens to share the file name was never added, so it stays.
-                    if utils::is_duplicate_torrent_file(&torrent_path, existing) {
-                        trash_duplicate(&torrent_path);
+                    if utils::is_duplicate_torrent_file(&torrent_path, existing) && trash_duplicate(&torrent_path) {
+                        index_changes.push(cli_tools_common::PathChange::removed_file(torrent_path.clone()));
                     }
                     continue;
                 }
@@ -237,7 +253,7 @@ impl QTorrent {
                 Ok(size) => {
                     stats.inc_success(size);
                     if let Some(directory) = downloaded_directory.as_deref() {
-                        move_torrent_file(&torrent_path, directory);
+                        move_torrent_file(&torrent_path, directory, index_changes);
                     }
                 }
                 Err(error) => {
@@ -306,12 +322,26 @@ impl QTorrent {
     }
 }
 
-/// Move the torrent file into the downloaded directory and log the outcome.
+/// Move the torrent file into the downloaded directory, log the outcome, and record real local moves.
 ///
 /// Errors are reported as warnings. They do not abort the surrounding workflow.
-fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
+fn move_torrent_file(
+    torrent_path: &Path,
+    downloaded_directory: &Path,
+    index_changes: &mut Vec<cli_tools_common::PathChange>,
+) {
+    let is_same_file_noop = torrent_path
+        .file_name()
+        .is_some_and(|name| cli_tools_common::paths_refer_to_same_file(torrent_path, &downloaded_directory.join(name)));
+
     match utils::move_torrent_to_downloaded(torrent_path, downloaded_directory) {
         Ok(destination) => {
+            if !is_same_file_noop {
+                index_changes.push(cli_tools_common::PathChange::moved_file(
+                    torrent_path.to_path_buf(),
+                    destination.clone(),
+                ));
+            }
             println!(
                 "  {} Moved torrent file to: {}",
                 "\u{2192}".green(),
@@ -324,10 +354,10 @@ fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
     }
 }
 
-/// Move a skipped duplicate torrent file to the trash and log the outcome.
+/// Move a skipped duplicate torrent file to the trash and return whether it was removed.
 ///
 /// Errors are reported as warnings. They do not abort the surrounding workflow.
-fn trash_duplicate_torrent_file(torrent_path: &Path) {
+fn trash_duplicate_torrent_file(torrent_path: &Path) -> bool {
     match cli_tools_common::move_to_trash(torrent_path) {
         Ok(()) => {
             println!(
@@ -335,13 +365,25 @@ fn trash_duplicate_torrent_file(torrent_path: &Path) {
                 "\u{1f5d1}".yellow(),
                 torrent_path.display().to_string().cyan()
             );
+            true
         }
         Err(error) => {
             cli_tools_common::print_yellow!(
                 "Failed to trash duplicate torrent file {}: {error}",
                 torrent_path.display()
             );
+            false
         }
+    }
+}
+
+/// Apply completed local `.torrent` moves and removals to the user's filefind index, if one exists.
+fn update_filefind_index(changes: &[cli_tools_common::PathChange]) {
+    if cfg!(test) || changes.is_empty() {
+        return;
+    }
+    for warning in filefind_common::update_default_index(changes) {
+        cli_tools_common::print_yellow!("Could not update filefind index: {warning}");
     }
 }
 
@@ -561,7 +603,10 @@ mod test_add_workflow {
                             assert_eq!(path, archive);
                             Ok(false)
                         },
-                        |path| trash_requested.push(path.to_path_buf()),
+                        |path| {
+                            trash_requested.push(path.to_path_buf());
+                            true
+                        },
                     )
                     .await?;
 
