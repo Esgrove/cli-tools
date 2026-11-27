@@ -27,6 +27,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 use cli_tools_common::{format_size, print_error, print_green, print_yellow};
+use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 use filefind_common::database::Database;
 #[cfg(windows)]
 use filefind_common::get_volume_prefix;
@@ -70,6 +71,8 @@ struct MoveContext<'a> {
     database: &'a Database,
     /// Flag set by the Ctrl+C handler to request graceful abort.
     abort_flag: &'a AtomicBool,
+    /// Cross-tool lock store, so files another cli-tools process is working on are skipped.
+    lock_store: Option<&'a ActiveLockStore>,
 }
 
 /// Summary of a completed move operation.
@@ -98,6 +101,8 @@ enum SkipReason {
     DuplicateName,
     /// A file with the same name already exists at the destination (no --force).
     ExistsAtDestination,
+    /// Another cli-tools process holds a lock on the file, named by the tool holding it.
+    LockedByOtherTool(String),
 }
 
 impl MoveSummary {
@@ -270,11 +275,14 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
     })
     .context("Failed to set Ctrl+C handler (it may already be registered)")?;
 
+    // Without the shared lock database, moves still work, just without coordinating with other tools.
+    let lock_store = ActiveLockStore::open_default("filefind").ok();
     let context = MoveContext {
         destination: &destination,
         force_overwrite,
         database,
         abort_flag: &abort_flag,
+        lock_store: lock_store.as_ref(),
     };
 
     // Execute the moves with progress
@@ -592,6 +600,28 @@ fn execute_moves(
 
         let dest_path = context.destination.join(&*file_name);
         let source_path = Path::new(&file.full_path);
+
+        let _lock_guard = match context
+            .lock_store
+            .map(|store| store.try_acquire(&[source_path.to_path_buf(), dest_path.clone()], "move"))
+        {
+            Some(Ok(AcquireOutcome::Acquired(guard))) => Some(guard),
+            Some(Ok(AcquireOutcome::AlreadyLocked(holder))) => {
+                summary.skipped_files.push(SkippedFile {
+                    path: file.full_path.clone(),
+                    reason: SkipReason::LockedByOtherTool(holder.tool),
+                });
+                progress_bar.inc(file.size);
+                continue;
+            }
+            Some(Err(error)) => {
+                progress_bar.suspend(|| {
+                    print_yellow!("Could not check file locks, moving without a lock: {error}");
+                });
+                None
+            }
+            None => None,
+        };
 
         match move_indexed_file(file, source_path, &dest_path, &file_name, &progress_bar, context) {
             Ok(()) => {
@@ -959,6 +989,25 @@ fn print_skipped_files(skipped_files: &[SkippedFile]) {
         );
         for skipped in &exists {
             println!("  {}", skipped.path.dimmed());
+        }
+    }
+
+    let locked: Vec<_> = skipped_files
+        .iter()
+        .filter_map(|skipped| match &skipped.reason {
+            SkipReason::LockedByOtherTool(tool) => Some((skipped, tool)),
+            SkipReason::DuplicateName | SkipReason::ExistsAtDestination => None,
+        })
+        .collect();
+
+    if !locked.is_empty() {
+        println!(
+            "\n{} ({}):",
+            "In use by another cli-tools process".yellow().bold(),
+            locked.len()
+        );
+        for (skipped, tool) in &locked {
+            println!("  {} ({tool})", skipped.path.dimmed());
         }
     }
 }
@@ -2392,6 +2441,107 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_moves_skips_files_locked_by_another_tool() {
+        let temp = TempDir::new().expect("temp directory");
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&dest_dir).expect("destination directory");
+        let locked_source = source_dir.join("converting.mkv");
+        let free_source = source_dir.join("free.mkv");
+        fs::write(&locked_source, "locked").expect("write locked source");
+        fs::write(&free_source, "free").expect("write free source");
+        let database = overwrite_test_database();
+        let locked_entry = make_file("converting.mkv", &locked_source.to_string_lossy(), 6);
+        let free_entry = make_file("free.mkv", &free_source.to_string_lossy(), 4);
+        database.insert_file(&locked_entry).expect("index locked source");
+        database.insert_file(&free_entry).expect("index free source");
+
+        let lock_database = temp.path().join("cli-tools.db");
+        let converter = ActiveLockStore::open_at(lock_database.clone(), "vconvert").expect("open converter locks");
+        let AcquireOutcome::Acquired(converter_guard) = converter
+            .try_acquire(std::slice::from_ref(&locked_source), "convert")
+            .expect("acquire converter lock")
+        else {
+            panic!("the converter should get the lock");
+        };
+        let mover_locks = ActiveLockStore::open_at(lock_database, "filefind").expect("open mover locks");
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: false,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: Some(&mover_locks),
+        };
+        let summary = execute_moves(&[&locked_entry, &free_entry], 10, 0, Vec::new(), &context);
+
+        assert_eq!(summary.moved, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.skipped_files.len(), 1);
+        assert_eq!(summary.skipped_files[0].path, locked_entry.full_path);
+        assert!(
+            matches!(&summary.skipped_files[0].reason, SkipReason::LockedByOtherTool(tool) if tool == "vconvert"),
+            "unexpected skip reason: {:?}",
+            summary.skipped_files[0].reason
+        );
+        assert_eq!(
+            fs::read_to_string(&locked_source).expect("locked source stays"),
+            "locked"
+        );
+        assert!(!dest_dir.join("converting.mkv").exists());
+        assert!(!free_source.exists());
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("free.mkv")).expect("free file moved"),
+            "free"
+        );
+        assert_eq!(
+            database
+                .search_by_path(&locked_source.to_string_lossy(), 10)
+                .expect("search locked source")
+                .len(),
+            1,
+            "the skipped file keeps its index entry"
+        );
+        drop(converter_guard);
+    }
+
+    #[test]
+    fn test_execute_moves_releases_its_locks_after_moving() {
+        let temp = TempDir::new().expect("temp directory");
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).expect("source directory");
+        fs::create_dir_all(&dest_dir).expect("destination directory");
+        let source = source_dir.join("data.txt");
+        fs::write(&source, "contents").expect("write source");
+        let database = overwrite_test_database();
+        let entry = make_file("data.txt", &source.to_string_lossy(), 8);
+        database.insert_file(&entry).expect("index source");
+        let mover_locks =
+            ActiveLockStore::open_at(temp.path().join("cli-tools.db"), "filefind").expect("open mover locks");
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: false,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: Some(&mover_locks),
+        };
+        let summary = execute_moves(&[&entry], 8, 0, Vec::new(), &context);
+
+        assert_eq!(summary.moved, 1);
+        assert!(summary.skipped_files.is_empty());
+        assert!(dest_dir.join("data.txt").exists());
+        assert!(
+            mover_locks.list_live_locks().expect("list locks").is_empty(),
+            "the move locks are released once the file is moved"
+        );
+    }
+
+    #[test]
     fn test_force_overwrite_replaces_file_and_indexed_destination() {
         let temp = TempDir::new().expect("temp directory");
         let source_dir = temp.path().join("source");
@@ -2413,6 +2563,7 @@ mod tests {
             force_overwrite: true,
             database: &database,
             abort_flag: &abort_flag,
+            lock_store: None,
         };
 
         assert!(
@@ -2470,6 +2621,7 @@ mod tests {
             force_overwrite: true,
             database: &database,
             abort_flag: &abort_flag,
+            lock_store: None,
         };
 
         assert!(
@@ -2517,6 +2669,7 @@ mod tests {
             force_overwrite: false,
             database: &database,
             abort_flag: &abort_flag,
+            lock_store: None,
         };
         let source_entry = make_file("source.txt", &source.to_string_lossy(), 6);
 
@@ -2560,6 +2713,7 @@ mod tests {
             force_overwrite: true,
             database: &database,
             abort_flag: &abort_flag,
+            lock_store: None,
         };
 
         assert!(
@@ -2603,6 +2757,7 @@ mod tests {
             force_overwrite: true,
             database: &database,
             abort_flag: &abort_flag,
+            lock_store: None,
         };
         let source_entry = make_file("missing.txt", &source.to_string_lossy(), 12);
 

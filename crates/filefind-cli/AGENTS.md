@@ -42,6 +42,8 @@ and the root `AGENTS.md` for the general workspace rules.
 - Files already in the destination directory or any of its subdirectories are counted,
   but neither moved nor reported as skips.
 - Duplicate file names across the search results are skipped, and the first occurrence wins.
+- Each move holds a `move` lock on the source and destination in the shared `active_locks` store of `cli-tools-db`.
+  Files that another cli-tools process holds, such as a video vconvert is converting, are skipped and listed.
 - The database is updated after each successful move.
   The MFT reference is cleared, since it may be invalid on the new volume.
 - The `ctrlc` handler can only be registered once per process.

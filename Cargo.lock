@@ -1512,6 +1512,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "cli-tools-common",
+ "cli-tools-db",
  "colored",
  "ctrlc",
  "filefind-common",
