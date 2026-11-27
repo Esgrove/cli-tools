@@ -242,6 +242,11 @@ The `filefind` CLI searches the index, and `filefind-tray` controls the daemon f
 Configuration is read from `~/.config/filefind.toml`, see [`filefind.toml`](./filefind.toml) for an example.
 See [`docs/filefind.md`](./docs/filefind.md) for the full documentation.
 
+The tools that rename, move, or delete files, dirmove, dots, dupefind, flipdate, rxrename, vconvert, and vres,
+update an existing filefind index after each run.
+Moves on network drives and other drives without the USN journal show up in searches right away,
+instead of after the next rescan.
+
 ```console
 Search the filefind index from the command line and move matching files
 

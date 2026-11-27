@@ -297,6 +297,11 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `crates/visaparse/` → `visaparse` - Parse Finvoice XML credit card statements and collect data
     - `crates/vtag/` → `vtag` - Create git version tags for a project (Rust, C++, Python)
 
+Tools that rename, move, delete, or trash files record each completed change as a `cli_tools_common::PathChange`
+and apply them once per run with `filefind_common::update_default_index`, printing the warnings it returns.
+The filefind index then follows their changes without waiting for the daemon.
+Libraries only report the changes, for example through their observer events, and the binaries apply them.
+
 Give each crate a short `README.md`.
 Add a new tool as a new crate under `crates/`,
 and only depend on the workspace crates and dependencies it actually uses,
@@ -375,6 +380,10 @@ Do not wrap prose by splitting a sentence at an arbitrary point in the middle.
   or in a root-level `test_*_properties` module when they need private items.
   Turn every shrunk failure into an example unit test in the owning module.
 - Fuzz targets live in `fuzz/fuzz_targets/`, a separate nightly workspace. See `fuzz/README.md`.
+- Tests of tools that update the filefind index set `FILEFIND_DB` and `FILEFIND_CONFIG` for every binary run,
+  since Windows ignores `HOME` for the config and data directories.
+  Use `filefind_common::test_support::IndexFixture` to seed an index and check it afterwards,
+  and skip the index in code that runs in process under `cfg(test)`.
 - **NEVER use nested modules inside test modules** - all test modules must be separate root-level `#[cfg(test)]` modules
 - Do NOT wrap test modules in a single parent `mod tests` module
 - When a split leaves several files sharing test helpers,
