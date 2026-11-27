@@ -252,12 +252,10 @@ mod ffprobe_result_tests {
             .expect("case-only rename should succeed without overwrite");
         assert!(target.exists());
 
-        #[cfg(unix)]
-        {
-            let src2 = temp_dir.path().join("clip.mp4");
-            let dangling = temp_dir.path().join("clip.1080p.mp4");
-            std::fs::write(&src2, b"clip").expect("write");
-            std::os::unix::fs::symlink(temp_dir.path().join("missing.mp4"), &dangling).expect("symlink");
+        let src2 = temp_dir.path().join("clip.mp4");
+        let dangling = temp_dir.path().join("clip.1080p.mp4");
+        std::fs::write(&src2, b"clip").expect("write");
+        if cli_tools_common::test_support::create_symlink(&temp_dir.path().join("missing.mp4"), &dangling) {
             let result2 = FFProbeResult {
                 file: src2,
                 resolution: Resolution::new(1920, 1080),

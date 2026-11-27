@@ -1296,12 +1296,14 @@ mod test_gather_nested_trees {
         assert_eq!(deep, vec!["a/b/c/plain.mp4", "a/b/vertical.1080x1920.mp4"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinked_directories_are_not_followed() {
         let tree = TempTree::with_entries(&["library/show/episode.mp4"]);
-        tree.symlink("library", "shortcut");
-        tree.symlink("library", "library/show/loop");
+        if tree.try_symlink("library", "shortcut").is_none()
+            || tree.try_symlink("library", "library/show/loop").is_none()
+        {
+            return;
+        }
 
         let (shallow, deep) = gather_both(&tree);
 
@@ -1309,12 +1311,14 @@ mod test_gather_nested_trees {
         assert_eq!(deep, vec!["library/show/episode.mp4"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinked_files_are_skipped_in_both_modes() {
         let tree = TempTree::with_entries(&["real.mp4", "nested/real.mkv"]);
-        tree.symlink("real.mp4", "link.mp4");
-        tree.symlink("nested/real.mkv", "nested/link.mkv");
+        if tree.try_symlink("real.mp4", "link.mp4").is_none()
+            || tree.try_symlink("nested/real.mkv", "nested/link.mkv").is_none()
+        {
+            return;
+        }
 
         let (shallow, deep) = gather_both(&tree);
 
