@@ -126,8 +126,8 @@ impl FileWatcher {
     ///
     /// Returns a channel receiver for change events and a shutdown handle.
     ///
-    /// Events for the same path within `debounce_ms` milliseconds are coalesced
-    /// to avoid processing rapid duplicate events.
+    /// Events for the same path within `debounce_ms` milliseconds are coalesced into one change.
+    /// The old and new names of a rename are paired into one rename change.
     pub fn start(&self) -> Result<(mpsc::Receiver<FileChangeEvent>, Arc<AtomicBool>)> {
         let (event_tx, event_rx) = mpsc::channel(1000);
         let shutdown = self.shutdown.clone();

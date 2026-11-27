@@ -357,8 +357,9 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn delete_files_under_path(&self, path: &str) -> Result<usize> {
-        // Windows paths are stored with backslashes, so a path given with forward slashes also matches
-        // its backslash spelling. Unix paths are stored with forward slashes and match as given.
+        // Windows paths are stored with backslashes,
+        // so a path given with forward slashes also matches its backslash spelling.
+        // Unix paths are stored with forward slashes and match as given.
         // Use Cow to avoid allocation when the path has no forward slashes.
         let backslash_path: Cow<'_, str> = if path.contains('/') {
             Cow::Owned(path.replace('/', "\\"))
