@@ -25,9 +25,9 @@ pub mod index_updates;
 pub mod ipc;
 pub mod types;
 
-pub use config::{CONFIG_PATH, CONFIG_PATH_ENV, LogLevel, PathMapping, UserConfig as Config};
+pub use config::{CONFIG_PATH, CONFIG_PATH_ENV, DATABASE_PATH_ENV, LogLevel, PathMapping, UserConfig as Config};
 pub use database::{Database, VolumeStats};
-pub use index_updates::{IndexUpdateReport, IndexUpdater};
+pub use index_updates::{IndexUpdateReport, IndexUpdater, update_default_index};
 #[cfg(feature = "ipc")]
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,

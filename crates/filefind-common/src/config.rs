@@ -2,11 +2,12 @@
 //!
 //! Configuration is read from `~/.config/filefind.toml`,
 //! or from the file named by the `FILEFIND_CONFIG` environment variable.
+//! The `FILEFIND_DB` environment variable overrides the index database path.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use clap::ValueEnum;
@@ -20,6 +21,11 @@ const PROJECT_NAME: &str = "filefind";
 ///
 /// Tests and other tools use it to point filefind at a separate config and database.
 pub const CONFIG_PATH_ENV: &str = "FILEFIND_CONFIG";
+
+/// Environment variable naming the index database to use instead of the configured or default one.
+///
+/// Tests of tools that update the index use it to keep away from the user's real index.
+pub const DATABASE_PATH_ENV: &str = "FILEFIND_DB";
 
 /// Path to the user configuration file.
 pub static CONFIG_PATH: LazyLock<Option<PathBuf>> =
@@ -259,13 +265,13 @@ impl UserConfig {
         }
     }
 
-    /// Get the database path, using the configured path or the default.
+    /// Get the database path from `FILEFIND_DB`, the configured path, or the default, in that order.
     #[must_use]
     pub fn database_path(&self) -> PathBuf {
-        self.daemon
-            .database_path
-            .clone()
-            .unwrap_or_else(|| DATABASE_PATH.clone())
+        resolve_database_path(
+            std::env::var_os(DATABASE_PATH_ENV),
+            self.daemon.database_path.as_deref(),
+        )
     }
 }
 
@@ -412,6 +418,17 @@ const fn default_true() -> bool {
 
 fn default_hyperlink_scheme() -> String {
     String::from("file")
+}
+
+/// Resolve the index database path from the `FILEFIND_DB` value and the configured path.
+///
+/// A non-empty override wins, then the configured path, then the default path in the local data directory.
+fn resolve_database_path(override_path: Option<OsString>, configured_path: Option<&Path>) -> PathBuf {
+    override_path
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| configured_path.map(Path::to_path_buf))
+        .unwrap_or_else(|| DATABASE_PATH.clone())
 }
 
 /// Resolve the config file from the `FILEFIND_CONFIG` value and the home directory.
@@ -1040,5 +1057,35 @@ mod test_resolve_config_path {
 
         assert_eq!(resolve_config_path(None, Some(temp.path().to_path_buf())), None);
         assert_eq!(resolve_config_path(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod test_resolve_database_path {
+    use super::*;
+
+    #[test]
+    fn override_wins_over_the_configured_path() {
+        assert_eq!(
+            resolve_database_path(Some(OsString::from("override.db")), Some(Path::new("configured.db"))),
+            PathBuf::from("override.db")
+        );
+    }
+
+    #[test]
+    fn configured_path_is_used_without_an_override() {
+        assert_eq!(
+            resolve_database_path(None, Some(Path::new("configured.db"))),
+            PathBuf::from("configured.db")
+        );
+        assert_eq!(
+            resolve_database_path(Some(OsString::new()), Some(Path::new("configured.db"))),
+            PathBuf::from("configured.db")
+        );
+    }
+
+    #[test]
+    fn default_path_is_used_without_an_override_or_configured_path() {
+        assert_eq!(resolve_database_path(None, None), *DATABASE_PATH);
     }
 }

@@ -43,6 +43,8 @@ The other filefind crates have their own `AGENTS.md`:
 
 User configuration is read from `~/.config/filefind.toml`,
 or from the file the `FILEFIND_CONFIG` environment variable names.
+`FILEFIND_DB` overrides the index database path.
+Tool tests set it, and `FILEFIND_CONFIG` to a missing file, so they never touch the user's real index.
 See `filefind.toml` in the repo root for an example.
 Remember to update the example config file when adding new config options.
 
@@ -70,7 +72,7 @@ Remember to update the example config file when adding new config options.
 ## Index updates from other tools
 
 cli-tools tools that rename, move, or delete files report them as `cli_tools_common::PathChange`
-and apply them with `IndexUpdater::open_default()` at the end of a run.
+and apply them with `update_default_index` at the end of a run, printing the warnings it returns.
 The updater only moves and removes entries that are already indexed and never adds new ones,
 since the daemon's exclude rules decide what belongs in the index.
 A move out of the configured `paths` removes the entries, and a change the daemon already applied changes nothing.

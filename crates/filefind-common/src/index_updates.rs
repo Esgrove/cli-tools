@@ -165,6 +165,28 @@ impl IndexUpdater {
     }
 }
 
+/// Apply `changes` to the user's filefind index, when there is one, and return the warnings to show.
+///
+/// Tools call this once after a run.
+/// It returns no warnings when there are no changes or no index,
+/// and index problems never fail the tool, they only come back as warnings.
+#[must_use]
+pub fn update_default_index(changes: &[PathChange]) -> Vec<String> {
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    update_index_with_config(&UserConfig::load(), changes)
+}
+
+/// Apply `changes` to the index named by `config` and return the warnings to show.
+fn update_index_with_config(config: &UserConfig, changes: &[PathChange]) -> Vec<String> {
+    match IndexUpdater::open_with_config(config) {
+        Ok(Some(updater)) => updater.apply(changes).errors,
+        Ok(None) => Vec::new(),
+        Err(error) => vec![format!("{error:#}")],
+    }
+}
+
 /// Resolve `path` against the current directory and return it as the string the index stores.
 fn absolute_path_string(path: &Path) -> Result<String> {
     let absolute: PathBuf = std::path::absolute(path)
@@ -374,6 +396,54 @@ mod test_index_updater {
         fn updater(&self) -> IndexUpdater {
             IndexUpdater::open_with_config(&self.config).unwrap().unwrap()
         }
+    }
+
+    #[test]
+    fn update_with_config_applies_the_changes_without_warnings() {
+        let index = TestIndex::new();
+        index.index(&["indexed/a.txt"]);
+
+        let warnings = update_index_with_config(
+            &index.config,
+            &[PathChange::moved_file(
+                index.path("indexed/a.txt"),
+                index.path("indexed/b.txt"),
+            )],
+        );
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(index.indexed(), vec!["indexed/b.txt"]);
+    }
+
+    #[test]
+    fn update_without_an_index_has_no_warnings() {
+        let temp = TempDir::new().unwrap();
+        let mut config = UserConfig::default();
+        config.daemon.database_path = Some(temp.path().join("missing.db"));
+
+        let warnings = update_index_with_config(&config, &[PathChange::removed_file(temp.path().join("a.txt"))]);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!temp.path().join("missing.db").exists());
+    }
+
+    #[test]
+    fn update_with_an_unreadable_index_returns_a_warning() {
+        let temp = TempDir::new().unwrap();
+        let database_path = temp.path().join("filefind.db");
+        fs::write(&database_path, "not a database").unwrap();
+        let mut config = UserConfig::default();
+        config.daemon.database_path = Some(database_path);
+
+        let warnings = update_index_with_config(&config, &[PathChange::removed_file(temp.path().join("a.txt"))]);
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("filefind index"), "{warnings:?}");
+    }
+
+    #[test]
+    fn update_default_index_with_no_changes_does_nothing() {
+        assert_eq!(update_default_index(&[]), Vec::<String>::new());
     }
 
     #[test]
