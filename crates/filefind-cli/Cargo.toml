@@ -22,7 +22,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 colored = { workspace = true }
 ctrlc = { workspace = true }
-filefind-common = { workspace = true }
+filefind-common = { workspace = true, features = ["clap"] }
 indicatif = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }

@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+#[cfg(feature = "clap")]
 use clap::ValueEnum;
 use serde::Deserialize;
 use tracing::warn;
+#[cfg(feature = "logging")]
 use tracing_subscriber::filter::LevelFilter;
 
 const PROJECT_NAME: &str = "filefind";
@@ -176,7 +178,8 @@ pub enum OutputFormat {
 }
 
 /// When to emit OSC 8 terminal hyperlinks for result paths.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "clap", derive(ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum HyperlinkMode {
     /// Emit hyperlinks only when the output goes to a terminal known to support OSC 8 (default).
@@ -189,7 +192,8 @@ pub enum HyperlinkMode {
 }
 
 /// Log level for the daemon.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[cfg_attr(feature = "clap", derive(ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Error messages only.
@@ -219,6 +223,7 @@ impl LogLevel {
     }
 
     /// Convert to a tracing `LevelFilter`.
+    #[cfg(feature = "logging")]
     #[must_use]
     pub const fn to_level_filter(self) -> LevelFilter {
         match self {
@@ -323,6 +328,7 @@ impl<'de> Deserialize<'de> for PathMapping {
     }
 }
 
+#[cfg(feature = "logging")]
 impl From<LogLevel> for LevelFilter {
     fn from(level: LogLevel) -> Self {
         level.to_level_filter()
@@ -853,6 +859,7 @@ paths = ["\\\\server\\share", "Z:\\", "C:\\Local"]
 
     // ── LogLevel::to_level_filter ─────────────────────────────────
 
+    #[cfg(feature = "logging")]
     #[test]
     fn test_log_level_to_level_filter() {
         assert_eq!(LogLevel::Error.to_level_filter(), LevelFilter::ERROR);
@@ -864,6 +871,7 @@ paths = ["\\\\server\\share", "Z:\\", "C:\\Local"]
 
     // ── From<LogLevel> for LevelFilter ────────────────────────────
 
+    #[cfg(feature = "logging")]
     #[test]
     fn test_log_level_into_level_filter() {
         let filter: LevelFilter = LogLevel::Error.into();

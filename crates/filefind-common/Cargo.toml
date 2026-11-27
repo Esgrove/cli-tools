@@ -16,7 +16,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 cli-tools-common = { workspace = true }
 cli-tools-db = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, optional = true }
 dirs = { workspace = true }
 postcard = { workspace = true, optional = true }
 regex = { workspace = true }
@@ -24,11 +24,15 @@ rusqlite = { workspace = true, features = ["functions"] }
 serde = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [features]
+# `clap::ValueEnum` derives for configuration enums used by CLI argument parsers.
+clap = ["dep:clap"]
 # The daemon IPC protocol used by the daemon and the tray, left out by index database users.
 ipc = ["dep:postcard"]
+# `tracing_subscriber::filter::LevelFilter` conversions for `LogLevel`.
+logging = ["dep:tracing-subscriber"]
 # The index fixture for tests of tools that update the index.
 test-support = []
 
