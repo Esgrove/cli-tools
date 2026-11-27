@@ -1,4 +1,4 @@
-# filefind
+# filefind-common
 
 Shared library for the filefind file indexing and search system.
 
@@ -6,7 +6,7 @@ This crate provides common functionality used by all other filefind crates:
 
 - **Configuration** - User configuration file handling (`~/.config/filefind.toml`)
 - **Database** - SQLite database operations for file index storage
-- **IPC** - Inter-process communication for daemon control (named pipes on Windows)
+- **IPC** - Inter-process communication for daemon control (named pipes on Windows), behind the `ipc` feature
 - **Types** - Common data structures and type definitions
 - **Utilities** - Path classification, formatting helpers, and logging utilities
 

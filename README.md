@@ -233,6 +233,94 @@ Options:
   -V, --version                Print version
 ```
 
+## Filefind
+
+Fast file indexing and search, built first for Windows.
+The `filefindd` daemon indexes NTFS drives by reading the Master File Table directly
+and follows changes through the USN journal, with directory walking and a file watcher for other drives.
+The `filefind` CLI searches the index, and `filefind-tray` controls the daemon from the system tray.
+Configuration is read from `~/.config/filefind.toml`, see [`filefind.toml`](./filefind.toml) for an example.
+See [`docs/filefind.md`](./docs/filefind.md) for the full documentation.
+
+```console
+Search the filefind index from the command line and move matching files
+
+Usage: filefind [OPTIONS] [PATTERNS]... [COMMAND]
+
+Commands:
+  stats       Show index statistics
+  volumes     List all indexed volumes
+  duplicates  Find duplicate files (same name ignoring extension, case-insensitive)
+  completion  Generate shell completion scripts
+  help        Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PATTERNS]...  Search patterns (supports glob patterns like *.txt)
+
+Options:
+  -a, --all              Match all patterns (logical AND)
+  -r, --regex            Use regex pattern for search
+  -c, --case             Case-sensitive search
+  -d, --drive <DRIVE>    Search only in specific drives. Accepts: "C", "C:", or "C:\"
+  -f, --files            Only show files
+  -D, --dirs             Only show directories
+  -m, --move <DIR>       Move all matching files to the specified directory
+  -F, --force            Force overwrite existing files at the move destination
+  -n, --limit <COUNT>    Maximum number of files to show per directory [default: 20]
+  -o, --output <OUTPUT>  Output format [possible values: list, name, grouped, info]
+  -l, --list             List output (shortcut for --output list)
+  -N, --name             Name-only output (shortcut for --output name)
+  -s, --sort <SORT>      Sort results by this field [possible values: name, size]
+  -L, --links <MODE>     Emit clickable terminal hyperlinks for result paths [possible values: auto, always, never]
+  -i, --info             Info output with file sizes (shortcut for --output info)
+  -v, --verbose          Print verbose output
+  -e, --exact            Exact pattern matches only
+  -h, --help             Print help (see more with '--help')
+  -V, --version          Print version
+```
+
+```console
+Background filefind daemon that indexes files and follows file system changes
+
+Usage: filefindd [OPTIONS] [COMMAND]
+
+Commands:
+  start       Start the daemon and begin indexing
+  stop        Stop the running daemon
+  status      Check daemon status
+  scan        Perform a one-time scan without starting the daemon
+  stats       Show index statistics
+  volumes     List indexed volumes
+  detect      Detect available drives and their types
+  reset       Delete the database and start fresh
+  prune       Remove database entries for files/directories that no longer exist
+  completion  Generate shell completion scripts
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -l, --log <LOG_LEVEL>  Set the log level [possible values: error, warn, info, debug, trace]
+  -v, --verbose          Print verbose output
+  -h, --help             Print help (see more with '--help')
+  -V, --version          Print version
+```
+
+```console
+System tray application that controls the filefind daemon
+
+Usage: filefind-tray [OPTIONS] [COMMAND]
+
+Commands:
+  completion  Generate shell completion scripts
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+  -f, --foreground   Run in foreground with console logging
+  -l, --log <LEVEL>  Set the log level [possible values: error, warn, info, debug, trace]
+  -v, --verbose      Enable verbose logging (shortcut for --log debug)
+  -h, --help         Print help (see more with '--help')
+  -V, --version      Print version
+```
+
 ## Flipdate
 
 Rename files and directories to use `yyyy.mm.dd` date format for files,

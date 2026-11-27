@@ -20,9 +20,9 @@ Indexes millions of files in seconds and keeps the database updated in real-time
 
 ## Components
 
-This project is organized as a Cargo workspace with multiple crates:
+filefind is made of four crates in the cli-tools workspace:
 
-- **filefind**: Shared library with database schema, configuration, and utilities
+- **filefind-common**: Shared library with database schema, configuration, and utilities
 - **filefind-daemon**: Background service that indexes and monitors file systems
 - **filefind-cli**: Command-line interface for searching the file index
 - **filefind-tray**: System tray application for daemon control
@@ -315,10 +315,10 @@ Batch insertion uses a fresh in-memory database for each measurement.
 No live index, filesystem scan, or administrator privileges are required.
 
 ```shell
-cargo bench -p filefind --bench database -- --quick
-cargo bench -p filefind --bench database
+cargo bench -p filefind-common --bench database -- --quick
+cargo bench -p filefind-common --bench database
 # Include an optional 1,000,000-row search and duplicates fixture:
-$env:FILEFIND_BENCH_LARGE = '1'; cargo bench -p filefind --bench database
+$env:FILEFIND_BENCH_LARGE = '1'; cargo bench -p filefind-common --bench database
 ```
 
 The default search and duplicate fixtures contain 10,000 and 100,000 rows.
