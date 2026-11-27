@@ -206,18 +206,22 @@ impl Database {
         Ok(crate::scope::find_volume_id_for_path(path, &volumes))
     }
 
-    /// Find the most specific indexed volume ID and mount point containing a path.
+    /// Find the most specific indexed volume mount containing a path.
     ///
     /// # Errors
     /// Returns an error if the volume query fails.
-    pub fn get_volume_for_path(&self, path: &str) -> Result<Option<(i64, String)>> {
-        let volumes: Vec<(i64, String)> = self
+    pub fn get_volume_for_path(&self, path: &str) -> Result<Option<crate::scope::VolumeMount>> {
+        let volumes: Vec<crate::scope::VolumeMount> = self
             .get_all_volumes()?
             .into_iter()
-            .filter_map(|volume| volume.id.map(|id| (id, volume.mount_point)))
+            .filter_map(|volume| {
+                volume.id.map(|volume_id| crate::scope::VolumeMount {
+                    volume_id,
+                    mount_point: volume.mount_point,
+                })
+            })
             .collect();
-        Ok(crate::scope::find_most_specific_volume(path, &volumes)
-            .map(|(id, mount_point)| (id, mount_point.to_string())))
+        Ok(crate::scope::find_most_specific_volume(path, &volumes).cloned())
     }
 
     /// Insert a file entry into the database.

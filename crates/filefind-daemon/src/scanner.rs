@@ -37,18 +37,6 @@ use crate::usn::{UsnChange, UsnMonitor};
 use crate::watcher::scan_directory_with_scope;
 
 /// Categorized paths for scanning.
-struct CategorizedPaths {
-    ntfs_drive_roots: Vec<char>,
-    local_paths_by_drive: HashMap<char, Vec<String>>,
-    mapped_network_drives: Vec<(char, PathBuf)>,
-    unc_paths: Vec<PathBuf>,
-    /// Local directories without a drive letter (Unix paths).
-    /// Scanned with directory walking since MFT requires a drive letter.
-    plain_directories: Vec<PathBuf>,
-    /// Configured paths that could not be accessed during categorization.
-    inaccessible_paths: Vec<String>,
-}
-
 /// Result from a scan operation.
 enum ScanResult {
     /// Successful scan with volume info and entries.
@@ -62,6 +50,37 @@ enum ScanResult {
     },
     /// Scan failed.
     Failed { label: String, error: String },
+}
+
+/// A configured mapped network drive letter paired with its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MappedDrivePath {
+    /// Uppercase Windows drive letter.
+    drive_letter: char,
+    /// Full configured path on that mapped drive.
+    path: PathBuf,
+}
+
+/// Output of a synchronous NTFS MFT scan before database ingestion.
+struct NtfsScanOutput {
+    /// Volume metadata read from the NTFS volume.
+    volume_info: IndexedVolume,
+    /// Indexed entries collected from the MFT.
+    entries: Vec<FileEntry>,
+    /// Current USN journal position when available.
+    current_usn: Option<i64>,
+}
+
+struct CategorizedPaths {
+    ntfs_drive_roots: Vec<char>,
+    local_paths_by_drive: HashMap<char, Vec<String>>,
+    mapped_network_drives: Vec<MappedDrivePath>,
+    unc_paths: Vec<PathBuf>,
+    /// Local directories without a drive letter (Unix paths).
+    /// Scanned with directory walking since MFT requires a drive letter.
+    plain_directories: Vec<PathBuf>,
+    /// Configured paths that could not be accessed during categorization.
+    inaccessible_paths: Vec<String>,
 }
 
 impl CategorizedPaths {
@@ -471,12 +490,12 @@ async fn scan_local_directories(drive_letter: char, paths: Vec<String>, scope: A
 
     // Try MFT scan first
     match scan_ntfs_volume_sync(drive_letter, &paths) {
-        Ok((volume_info, entries, current_usn)) => vec![ScanResult::Success {
+        Ok(output) => vec![ScanResult::Success {
             label,
-            volume_info,
-            entries: filter_excluded_entries(entries, &scope),
+            volume_info: output.volume_info,
+            entries: filter_excluded_entries(output.entries, &scope),
             elapsed: start.elapsed(),
-            current_usn,
+            current_usn: output.current_usn,
         }],
         Err(mft_error) => {
             // Fallback to directory walking for each path
@@ -521,12 +540,12 @@ async fn scan_mapped_drive(drive_letter: char, scan_path: PathBuf, scope: Arc<In
 
     // Try MFT scan first
     match scan_ntfs_volume_sync(drive_letter, &[]) {
-        Ok((volume_info, entries, current_usn)) => ScanResult::Success {
+        Ok(output) => ScanResult::Success {
             label,
-            volume_info,
-            entries: filter_excluded_entries(entries, &scope),
+            volume_info: output.volume_info,
+            entries: filter_excluded_entries(output.entries, &scope),
             elapsed: start.elapsed(),
-            current_usn,
+            current_usn: output.current_usn,
         },
         Err(mft_error) => {
             // Fallback to directory walking
@@ -718,7 +737,7 @@ fn create_directory_volume_info(path: &Path) -> IndexedVolume {
 fn categorize_paths(paths_to_scan: Vec<String>) -> CategorizedPaths {
     let mut ntfs_drive_roots: Vec<char> = Vec::new();
     let mut local_paths_by_drive: HashMap<char, Vec<String>> = HashMap::new();
-    let mut mapped_network_drives: Vec<(char, PathBuf)> = Vec::new();
+    let mut mapped_network_drives: Vec<MappedDrivePath> = Vec::new();
     let mut unc_paths: Vec<PathBuf> = Vec::new();
     let mut plain_directories: Vec<PathBuf> = Vec::new();
     let mut inaccessible_paths: Vec<String> = Vec::new();
@@ -748,7 +767,10 @@ fn categorize_paths(paths_to_scan: Vec<String>) -> CategorizedPaths {
             }
             PathType::MappedNetworkDrive => {
                 if let Some(drive_letter) = extract_drive_letter(&scan_path) {
-                    mapped_network_drives.push((drive_letter, scan_path));
+                    mapped_network_drives.push(MappedDrivePath {
+                        drive_letter,
+                        path: scan_path,
+                    });
                 }
             }
             PathType::UncPath => {
@@ -828,10 +850,10 @@ fn spawn_scan_tasks(
         }));
     }
 
-    for (drive_letter, scan_path) in categorized.mapped_network_drives {
+    for mapped in categorized.mapped_network_drives {
         let scope = Arc::clone(scope);
         tasks.push(tokio::spawn(async move {
-            vec![scan_mapped_drive(drive_letter, scan_path, scope).await]
+            vec![scan_mapped_drive(mapped.drive_letter, mapped.path, scope).await]
         }));
     }
 
@@ -851,12 +873,12 @@ fn scan_ntfs_drive(drive_letter: char, scope: &IndexScope) -> ScanResult {
     let label = format!("{drive_letter}:");
     let start = Instant::now();
     match scan_ntfs_volume_sync(drive_letter, &[]) {
-        Ok((volume_info, entries, current_usn)) => ScanResult::Success {
+        Ok(output) => ScanResult::Success {
             label,
-            volume_info,
-            entries: filter_excluded_entries(entries, scope),
+            volume_info: output.volume_info,
+            entries: filter_excluded_entries(output.entries, scope),
             elapsed: start.elapsed(),
-            current_usn,
+            current_usn: output.current_usn,
         },
         Err(error) => ScanResult::Failed {
             label,
@@ -1017,10 +1039,7 @@ fn prune_non_ntfs_volumes(database: &Database, volume_ids_to_prune: &[i64], max_
 }
 
 /// Synchronous NTFS volume scan that returns volume info, entries, and current USN.
-fn scan_ntfs_volume_sync(
-    drive_letter: char,
-    path_filters: &[String],
-) -> Result<(IndexedVolume, Vec<FileEntry>, Option<i64>)> {
+fn scan_ntfs_volume_sync(drive_letter: char, path_filters: &[String]) -> Result<NtfsScanOutput> {
     let scanner = MftScanner::new(drive_letter)?;
     let volume_info = scanner.get_volume_info()?;
     let current_usn = UsnMonitor::new(drive_letter, 0)
@@ -1029,7 +1048,11 @@ fn scan_ntfs_volume_sync(
         .map(|info| info.next_usn);
     let entries = scanner.scan_filtered(path_filters)?;
 
-    Ok((volume_info, entries, current_usn))
+    Ok(NtfsScanOutput {
+        volume_info,
+        entries,
+        current_usn,
+    })
 }
 
 #[cfg(test)]
@@ -1398,7 +1421,10 @@ mod tests {
         let paths = CategorizedPaths {
             ntfs_drive_roots: vec!['C'],
             local_paths_by_drive: local,
-            mapped_network_drives: vec![('Z', PathBuf::from("Z:\\"))],
+            mapped_network_drives: vec![MappedDrivePath {
+                drive_letter: 'Z',
+                path: PathBuf::from("Z:\\"),
+            }],
             unc_paths: vec![PathBuf::from("\\\\server\\share")],
             plain_directories: Vec::new(),
             inaccessible_paths: Vec::new(),
@@ -1431,7 +1457,7 @@ mod tests {
         assert_eq!(categorized.task_count(), 0);
         assert_eq!(categorized.ntfs_drive_roots, [] as [char; 0]);
         assert!(categorized.local_paths_by_drive.is_empty());
-        assert_eq!(categorized.mapped_network_drives, [] as [(char, std::path::PathBuf); 0]);
+        assert_eq!(categorized.mapped_network_drives, [] as [MappedDrivePath; 0]);
         assert_eq!(categorized.unc_paths, [] as [std::path::PathBuf; 0]);
     }
 
@@ -1471,7 +1497,7 @@ mod tests {
         // It should not end up in any other category either
         assert_eq!(categorized.ntfs_drive_roots, [] as [char; 0]);
         assert!(categorized.local_paths_by_drive.is_empty());
-        assert_eq!(categorized.mapped_network_drives, [] as [(char, std::path::PathBuf); 0]);
+        assert_eq!(categorized.mapped_network_drives, [] as [MappedDrivePath; 0]);
     }
 
     #[test]
@@ -2587,7 +2613,7 @@ mod tests {
         assert_eq!(categorized.task_count(), 1);
         assert_eq!(categorized.ntfs_drive_roots, [] as [char; 0]);
         assert_eq!(categorized.unc_paths, [] as [std::path::PathBuf; 0]);
-        assert_eq!(categorized.mapped_network_drives, [] as [(char, std::path::PathBuf); 0]);
+        assert_eq!(categorized.mapped_network_drives, [] as [MappedDrivePath; 0]);
     }
 
     #[test]
@@ -2601,7 +2627,7 @@ mod tests {
         assert_eq!(categorized.task_count(), 0);
         assert_eq!(categorized.ntfs_drive_roots, [] as [char; 0]);
         assert!(categorized.local_paths_by_drive.is_empty());
-        assert_eq!(categorized.mapped_network_drives, [] as [(char, std::path::PathBuf); 0]);
+        assert_eq!(categorized.mapped_network_drives, [] as [MappedDrivePath; 0]);
         assert_eq!(categorized.unc_paths, [] as [std::path::PathBuf; 0]);
     }
 
@@ -2666,7 +2692,16 @@ mod tests {
         let paths = CategorizedPaths {
             ntfs_drive_roots: vec!['E', 'F', 'G'],
             local_paths_by_drive: local,
-            mapped_network_drives: vec![('X', PathBuf::from("X:\\")), ('Y', PathBuf::from("Y:\\"))],
+            mapped_network_drives: vec![
+                MappedDrivePath {
+                    drive_letter: 'X',
+                    path: PathBuf::from("X:\\"),
+                },
+                MappedDrivePath {
+                    drive_letter: 'Y',
+                    path: PathBuf::from("Y:\\"),
+                },
+            ],
             unc_paths: vec![
                 PathBuf::from("\\\\server1\\share"),
                 PathBuf::from("\\\\server2\\share"),
@@ -2697,7 +2732,10 @@ mod tests {
         let paths = CategorizedPaths {
             ntfs_drive_roots: Vec::new(),
             local_paths_by_drive: HashMap::new(),
-            mapped_network_drives: vec![('Z', PathBuf::from("Z:\\"))],
+            mapped_network_drives: vec![MappedDrivePath {
+                drive_letter: 'Z',
+                path: PathBuf::from("Z:\\"),
+            }],
             unc_paths: Vec::new(),
             plain_directories: Vec::new(),
             inaccessible_paths: Vec::new(),

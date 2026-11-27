@@ -47,6 +47,15 @@ use windows::Win32::System::Pipes::{
 
 use filefind_common::{DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, Database, get_ipc_path};
 
+/// Bound Unix domain socket paired with the exclusive lock file that owns it for the daemon lifetime.
+#[cfg(not(windows))]
+struct BoundUnixSocket {
+    /// Listening Unix domain socket.
+    listener: UnixListener,
+    /// Open lock file holding the kernel advisory lock until the server shuts down.
+    _lock_file: File,
+}
+
 /// Atomic wrapper for daemon state.
 pub struct AtomicDaemonState(AtomicU8);
 
@@ -409,7 +418,7 @@ impl IpcServer {
     #[cfg(not(windows))]
     fn run_unix_blocking(&self, ready_sender: &SyncSender<Result<()>>) {
         let socket_path = self.effective_pipe_path();
-        let (listener, _lock_guard) = match bind_exclusive_unix_socket(socket_path) {
+        let bound = match bind_exclusive_unix_socket(socket_path) {
             Ok(bound) => bound,
             Err(error) => {
                 error!(
@@ -421,7 +430,7 @@ impl IpcServer {
             }
         };
 
-        if let Err(error) = listener.set_nonblocking(true) {
+        if let Err(error) = bound.listener.set_nonblocking(true) {
             error!("Failed to set non-blocking on IPC listener: {error}");
             let _ = std::fs::remove_file(socket_path);
             let _ = ready_sender.send(Err(
@@ -440,7 +449,7 @@ impl IpcServer {
             }
 
             // Try to accept a connection
-            match listener.accept() {
+            match bound.listener.accept() {
                 Ok((stream, _)) => {
                     debug!("Client connected to IPC server");
                     if let Err(error) = self.handle_unix_client_sync(&stream) {
@@ -458,7 +467,7 @@ impl IpcServer {
         }
 
         // Drop the listener and unlink our owned socket before releasing the lock file.
-        drop(listener);
+        drop(bound.listener);
         let _ = std::fs::remove_file(socket_path);
     }
 
@@ -591,7 +600,7 @@ pub fn spawn_ipc_server_with_path(
 
 /// Acquire an exclusive lifetime lock, recover only a stale socket, and bind `socket_path` with `0600` permissions.
 #[cfg(not(windows))]
-fn bind_exclusive_unix_socket(socket_path: &Path) -> Result<(UnixListener, File)> {
+fn bind_exclusive_unix_socket(socket_path: &Path) -> Result<BoundUnixSocket> {
     if let Some(parent) = socket_path.parent()
         && !parent.exists()
     {
@@ -649,7 +658,10 @@ fn bind_exclusive_unix_socket(socket_path: &Path) -> Result<(UnixListener, File)
     std::fs::set_permissions(socket_path, Permissions::from_mode(0o600))
         .with_context(|| format!("Failed to restrict permissions on IPC socket {}", socket_path.display()))?;
 
-    Ok((listener, lock_file))
+    Ok(BoundUnixSocket {
+        listener,
+        _lock_file: lock_file,
+    })
 }
 
 /// Derive the adjacent exclusive lock file path for a Unix domain socket.

@@ -60,6 +60,14 @@ pub struct MoveCandidate {
     pub display_path: String,
 }
 
+/// Temporary backup directory holding an overwritten destination until reconciliation succeeds.
+struct DestinationBackup {
+    /// Sibling temporary directory keeping the backed-up destination isolated.
+    directory: tempfile::TempDir,
+    /// Full path of the backed-up entry inside `directory`.
+    backup_path: PathBuf,
+}
+
 /// A file that was skipped during the move, with the reason.
 struct SkippedFile {
     /// Full path of the skipped file.
@@ -735,21 +743,18 @@ fn execute_moves(
     )
 }
 
-fn restore_destination_backup(
-    backup: Option<(tempfile::TempDir, std::path::PathBuf)>,
-    destination: &Path,
-) -> Result<()> {
-    if let Some((directory, backup_path)) = backup {
+fn restore_destination_backup(backup: Option<DestinationBackup>, destination: &Path) -> Result<()> {
+    if let Some(backup) = backup {
         if fs::symlink_metadata(destination).is_ok() {
-            let preserved = directory.keep();
+            let preserved = backup.directory.keep();
             return Err(anyhow::anyhow!(
                 "Could not restore {} because another file appeared. Original destination is preserved at {}",
                 destination.display(),
                 preserved.display()
             ));
         }
-        if let Err(error) = fs::rename(&backup_path, destination) {
-            let preserved = directory.keep();
+        if let Err(error) = fs::rename(&backup.backup_path, destination) {
+            let preserved = backup.directory.keep();
             return Err(anyhow::anyhow!(
                 "Could not restore {}: {}. Original destination is preserved at {}",
                 destination.display(),
@@ -934,15 +939,15 @@ fn move_indexed_file(
             .map_err(|error| MoveError::Failed(error.into()))?;
         let backup_path = directory.path().join(file_name);
         fs::rename(destination, &backup_path).map_err(|error| MoveError::Failed(error.into()))?;
-        Some((directory, backup_path))
+        Some(DestinationBackup { directory, backup_path })
     } else {
         None
     };
 
     if let Err(error) = move_single_file(source, destination, file.size, progress_bar, context.abort_flag) {
         if fs::symlink_metadata(destination).is_ok() {
-            if let Some((directory, _)) = backup {
-                let preserved = directory.keep();
+            if let Some(backup) = backup {
+                let preserved = backup.directory.keep();
                 return Err(MoveError::Failed(anyhow::anyhow!(
                     "Move failed with a destination still present at {}. Original destination preserved at {}",
                     destination.display(),
@@ -960,10 +965,10 @@ fn move_indexed_file(
             .database
             .reconcile_moved_file(&file.full_path, &destination_key, file_name, backup.is_some());
     if matches!(reconciliation, Ok(true)) {
-        if let Some((directory, backup_path)) = backup
-            && let Err(error) = fs::remove_file(&backup_path)
+        if let Some(backup) = backup
+            && let Err(error) = fs::remove_file(&backup.backup_path)
         {
-            let preserved = directory.keep();
+            let preserved = backup.directory.keep();
             print_yellow!(
                 "Moved file, but failed to remove old destination backup at {}: {}",
                 preserved.display(),
@@ -987,7 +992,7 @@ fn rollback_unreconciled_move(
     destination: &Path,
     size: u64,
     progress_bar: &ProgressBar,
-    backup: Option<(tempfile::TempDir, PathBuf)>,
+    backup: Option<DestinationBackup>,
     reconciliation_error: anyhow::Error,
 ) -> Result<(), MoveError> {
     let rollback = if fs::symlink_metadata(source).is_ok() {
@@ -1006,7 +1011,7 @@ fn rollback_unreconciled_move(
         })
     };
     if let Err(rollback_error) = rollback {
-        let backup_location = backup.map(|(directory, _)| directory.keep());
+        let backup_location = backup.map(|backup| backup.directory.keep());
         return Err(MoveError::Failed(anyhow::anyhow!(
             "Moved {}, but index reconciliation failed: {}. Rollback failed: {}. Old destination backup: {:?}",
             destination.display(),
@@ -2882,7 +2887,13 @@ mod tests {
         fs::write(&backup_path, "original").expect("write backup");
         fs::write(&destination, "new arrival").expect("write concurrent destination");
 
-        let result = restore_destination_backup(Some((backup_dir, backup_path.clone())), &destination);
+        let result = restore_destination_backup(
+            Some(DestinationBackup {
+                directory: backup_dir,
+                backup_path: backup_path.clone(),
+            }),
+            &destination,
+        );
 
         assert!(result.is_err());
         assert_eq!(

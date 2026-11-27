@@ -19,13 +19,31 @@ use filefind_common::scope::path_to_utf8;
 use filefind_common::types::FileChangeEvent;
 use tracing::warn;
 
+/// A pending debounced file change paired with when it was first seen.
+#[derive(Debug)]
+struct PendingChange {
+    /// Latest coalesced change event for the path.
+    event: FileChangeEvent,
+    /// Timestamp when this path first entered the debounce window.
+    first_seen: Instant,
+}
+
+/// Old name of an unpaired rename waiting for its destination event.
+#[derive(Debug)]
+struct PendingRenameSource {
+    /// Original path before the rename.
+    path: PathBuf,
+    /// Timestamp when the old-name event was observed.
+    seen_at: Instant,
+}
+
 /// Changes waiting for their debounce period, keyed by the path they apply to.
 #[derive(Debug, Default)]
 pub(super) struct PendingEvents {
     /// The latest change for each path, with the time it was first seen.
-    changes: HashMap<PathBuf, (FileChangeEvent, Instant)>,
+    changes: HashMap<PathBuf, PendingChange>,
     /// Old names of renames whose new name has not arrived yet, oldest first.
-    rename_sources: VecDeque<(PathBuf, Instant)>,
+    rename_sources: VecDeque<PendingRenameSource>,
 }
 
 impl PendingEvents {
@@ -59,13 +77,14 @@ impl PendingEvents {
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
                 for path in event.paths {
                     if !is_excluded(&path) {
-                        self.rename_sources.push_back((path, now));
+                        self.rename_sources
+                            .push_back(PendingRenameSource { path, seen_at: now });
                     }
                 }
             }
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                 for path in event.paths {
-                    let source = self.rename_sources.pop_front().map(|(source, _)| source);
+                    let source = self.rename_sources.pop_front().map(|pending| pending.path);
                     match (source, is_excluded(&path)) {
                         (Some(source), false) => self.rename(source, path, now),
                         (Some(source), true) => self.insert(source.clone(), FileChangeEvent::Deleted(source), now),
@@ -118,16 +137,16 @@ impl PendingEvents {
     /// A rename whose new name never arrived within the debounce period becomes a delete of the old name.
     pub(super) fn take_due(&mut self, now: Instant, debounce: Duration) -> Vec<FileChangeEvent> {
         let mut due = Vec::new();
-        while let Some((source, seen)) = self.rename_sources.front() {
-            if now.duration_since(*seen) < debounce {
+        while let Some(pending) = self.rename_sources.front() {
+            if now.duration_since(pending.seen_at) < debounce {
                 break;
             }
-            due.push(FileChangeEvent::Deleted(source.clone()));
+            due.push(FileChangeEvent::Deleted(pending.path.clone()));
             self.rename_sources.pop_front();
         }
-        self.changes.retain(|_path, (change, seen)| {
-            if now.duration_since(*seen) >= debounce {
-                due.push(change.clone());
+        self.changes.retain(|_path, pending| {
+            if now.duration_since(pending.first_seen) >= debounce {
+                due.push(pending.event.clone());
                 false
             } else {
                 true
@@ -141,33 +160,33 @@ impl PendingEvents {
         let mut all: Vec<FileChangeEvent> = self
             .rename_sources
             .drain(..)
-            .map(|(source, _)| FileChangeEvent::Deleted(source))
+            .map(|pending| FileChangeEvent::Deleted(pending.path))
             .collect();
-        all.extend(self.changes.drain().map(|(_, (change, _))| change));
+        all.extend(self.changes.drain().map(|(_, pending)| pending.event));
         all
     }
 
     /// Record a rename, folding it into any pending change of the old path.
     fn rename(&mut self, from: PathBuf, to: PathBuf, now: Instant) {
-        let change = match self.changes.remove(&from) {
+        let event = match self.changes.remove(&from).map(|pending| pending.event) {
             // A file created and renamed within the debounce period is simply created at its new name.
-            Some((FileChangeEvent::Created(_), _)) => FileChangeEvent::Created(to.clone()),
+            Some(FileChangeEvent::Created(_)) => FileChangeEvent::Created(to.clone()),
             // A chain of renames keeps the original old name, which is the one in the index.
-            Some((FileChangeEvent::Renamed { from: original, .. }, _)) => FileChangeEvent::Renamed {
+            Some(FileChangeEvent::Renamed { from: original, .. }) => FileChangeEvent::Renamed {
                 from: original,
                 to: to.clone(),
             },
             _ => FileChangeEvent::Renamed { from, to: to.clone() },
         };
-        self.changes.insert(to, (change, now));
+        self.changes.insert(to, PendingChange { event, first_seen: now });
     }
 
     /// Record a change for `path`, keeping a pending create, rename, or delete when a stale modify arrives afterwards.
     fn insert(&mut self, path: PathBuf, change: FileChangeEvent, now: Instant) {
         self.changes
             .entry(path)
-            .and_modify(|(existing, _seen)| {
-                let keeps_existing = match (&*existing, &change) {
+            .and_modify(|pending| {
+                let keeps_existing = match (&pending.event, &change) {
                     (FileChangeEvent::Created(_) | FileChangeEvent::Renamed { .. }, FileChangeEvent::Modified(_)) => {
                         true
                     }
@@ -177,10 +196,13 @@ impl PendingEvents {
                     _ => false,
                 };
                 if !keeps_existing {
-                    *existing = change.clone();
+                    pending.event = change.clone();
                 }
             })
-            .or_insert((change, now));
+            .or_insert(PendingChange {
+                event: change,
+                first_seen: now,
+            });
     }
 }
 

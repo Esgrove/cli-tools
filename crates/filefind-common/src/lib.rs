@@ -35,7 +35,7 @@ pub use index_updates::{IndexUpdateReport, IndexUpdater, update_default_index};
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,
 };
-pub use scope::IndexScope;
+pub use scope::{IndexScope, VolumeMount};
 pub use types::{FileChangeEvent, FileEntry, IndexedVolume, VolumeType};
 
 /// Project name constant.

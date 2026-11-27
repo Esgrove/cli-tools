@@ -23,7 +23,8 @@ use cli_tools_common::{format_number, print_cyan, print_error, print_green, prin
 use colored::Colorize;
 use filefind_common::scope::find_most_specific_volume;
 use filefind_common::{
-    Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IndexScope, IpcClient, extract_drive_letter_from_str,
+    Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IndexScope, IpcClient, VolumeMount,
+    extract_drive_letter_from_str,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -40,6 +41,56 @@ const DEFAULT_USN_POLL_INTERVAL_MS: u64 = 1000;
 
 /// Default file watcher debounce interval in milliseconds.
 const DEFAULT_WATCHER_DEBOUNCE_MS: u64 = 2000;
+
+/// Represents the running state of the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonState {
+    /// Daemon is not running.
+    Stopped,
+    /// Daemon is starting up (scanning, initializing monitors).
+    Starting,
+    /// Daemon is running and monitoring for changes.
+    Running,
+    /// Daemon is shutting down.
+    Stopping,
+}
+
+/// Cache key identifying an indexed NTFS directory by drive letter and MFT reference number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DirectoryCacheKey {
+    /// Uppercase Windows drive letter.
+    drive_letter: char,
+    /// MFT file reference number on that drive.
+    mft_reference: u64,
+}
+
+/// Batch of raw USN journal changes read from one NTFS drive.
+struct DriveUsnBatch {
+    /// Uppercase Windows drive letter.
+    drive_letter: char,
+    /// Raw USN changes collected during the poll.
+    changes: Vec<UsnChange>,
+    /// Next USN cursor to persist after processing `changes`.
+    next_usn: i64,
+}
+
+/// Updated USN journal position to persist for one NTFS drive.
+struct DriveUsnUpdate {
+    /// Uppercase Windows drive letter.
+    drive_letter: char,
+    /// Latest processed USN journal position.
+    usn: i64,
+}
+
+/// Database row loaded while rebuilding the directory MFT path cache.
+struct CachedDirectoryRow {
+    /// Uppercase Windows drive letter derived from the volume mount point, if any.
+    drive_letter: Option<char>,
+    /// MFT file reference number of the directory.
+    mft_reference: u64,
+    /// Full indexed directory path.
+    path: String,
+}
 
 /// The main daemon struct that manages file indexing.
 pub struct Daemon {
@@ -68,10 +119,10 @@ pub struct Daemon {
     watcher_receiver: Option<mpsc::Receiver<FileChangeEvent>>,
 
     /// Cache of MFT file reference to full path (for path resolution).
-    path_cache: HashMap<(char, u64), String>,
+    path_cache: HashMap<DirectoryCacheKey, String>,
 
-    /// Cached `(volume_id, mount_point)` pairs for component-aware volume lookup.
-    volume_mounts: Vec<(i64, String)>,
+    /// Cached volume mounts for component-aware volume lookup.
+    volume_mounts: Vec<VolumeMount>,
 
     /// Shared state for IPC server.
     ipc_state: Arc<IpcServerState>,
@@ -113,19 +164,6 @@ struct VolumeMonitor {
 
     /// Last processed USN for this volume.
     last_usn: i64,
-}
-
-/// Represents the running state of the daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonState {
-    /// Daemon is not running.
-    Stopped,
-    /// Daemon is starting up (scanning, initializing monitors).
-    Starting,
-    /// Daemon is running and monitoring for changes.
-    Running,
-    /// Daemon is shutting down.
-    Stopping,
 }
 
 impl std::fmt::Display for DaemonState {
@@ -606,18 +644,22 @@ impl Daemon {
     /// Process any pending file changes.
     fn process_changes(&mut self) -> bool {
         // Collect raw USN changes first to avoid borrow issues
-        let mut raw_changes: Vec<(char, Vec<UsnChange>, i64)> = Vec::new();
+        let mut raw_changes: Vec<DriveUsnBatch> = Vec::new();
         let mut needs_rescan = false;
 
         for monitor in self.volume_monitors.values_mut() {
             if let Some(ref mut usn) = monitor.usn_monitor {
                 match usn.read_changes() {
-                    Ok((changes, new_usn)) => {
+                    Ok((changes, next_usn)) => {
                         if !changes.is_empty() {
                             debug!("Processing {} USN changes", changes.len());
                             let drive_letter = usn.get_drive_letter();
-                            raw_changes.push((drive_letter, changes, new_usn));
-                            monitor.last_usn = new_usn;
+                            raw_changes.push(DriveUsnBatch {
+                                drive_letter,
+                                changes,
+                                next_usn,
+                            });
+                            monitor.last_usn = next_usn;
                         }
                     }
                     Err(error) => {
@@ -629,26 +671,27 @@ impl Daemon {
         }
 
         // Now process the collected changes (no longer borrowing volume_monitors)
-        let mut usn_updates: Vec<(char, i64)> = Vec::new();
+        let mut usn_updates: Vec<DriveUsnUpdate> = Vec::new();
         // Collect deletions by volume for batch processing via MFT reference
         let mut deletions_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
 
-        for (drive_letter, changes, new_usn) in raw_changes {
-            for change in &changes {
+        for batch in raw_changes {
+            let drive_letter = batch.drive_letter;
+            for change in &batch.changes {
                 // Handle deletions specially - use MFT reference directly since path may not be resolvable
                 if change.is_delete() {
                     if change.is_directory {
-                        let path = self
-                            .path_cache
-                            .get(&(drive_letter, change.file_reference))
-                            .cloned()
-                            .or_else(|| {
-                                let volume_id = self.get_volume_id_for_path(Path::new(&format!("{drive_letter}:")))?;
-                                self.database
-                                    .as_ref()?
-                                    .get_path_by_mft_reference(volume_id, change.file_reference)
-                                    .ok()?
-                            });
+                        let key = DirectoryCacheKey {
+                            drive_letter,
+                            mft_reference: change.file_reference,
+                        };
+                        let path = self.path_cache.get(&key).cloned().or_else(|| {
+                            let volume_id = self.get_volume_id_for_path(Path::new(&format!("{drive_letter}:")))?;
+                            self.database
+                                .as_ref()?
+                                .get_path_by_mft_reference(volume_id, change.file_reference)
+                                .ok()?
+                        });
                         if let Some(path) = path {
                             needs_rescan |= !self.update_directory_index(drive_letter, change, &path);
                         } else {
@@ -685,17 +728,20 @@ impl Daemon {
                     needs_rescan = true;
                 }
             }
-            deletions_by_drive.insert(drive_letter, deleted_references(&changes));
-            usn_updates.push((drive_letter, new_usn));
+            deletions_by_drive.insert(drive_letter, deleted_references(&batch.changes));
+            usn_updates.push(DriveUsnUpdate {
+                drive_letter,
+                usn: batch.next_usn,
+            });
         }
 
         needs_rescan |= self.apply_usn_deletions(&deletions_by_drive);
 
         // Update USN values in database
         if !needs_rescan && let Some(ref db) = self.database {
-            for (drive_letter, new_usn) in usn_updates {
-                if let Err(error) = db.update_volume_usn_by_drive(drive_letter, new_usn) {
-                    error!("Failed to update USN for drive {}: {}", drive_letter, error);
+            for update in usn_updates {
+                if let Err(error) = db.update_volume_usn_by_drive(update.drive_letter, update.usn) {
+                    error!("Failed to update USN for drive {}: {}", update.drive_letter, error);
                     needs_rescan = true;
                 }
             }
@@ -707,8 +753,12 @@ impl Daemon {
 
     fn handle_out_of_scope_change(&mut self, drive_letter: char, change: &UsnChange, path: String) -> bool {
         if change.is_directory {
+            let key = DirectoryCacheKey {
+                drive_letter,
+                mft_reference: change.file_reference,
+            };
             if change.is_rename_new()
-                && let Some(old_path) = self.path_cache.get(&(drive_letter, change.file_reference)).cloned()
+                && let Some(old_path) = self.path_cache.get(&key).cloned()
             {
                 if let Some(ref database) = self.database
                     && let Err(error) = database.delete_files_under_path(&old_path)
@@ -718,7 +768,7 @@ impl Daemon {
                 }
                 self.rebase_cached_paths(drive_letter, &old_path, &path);
             }
-            self.path_cache.insert((drive_letter, change.file_reference), path);
+            self.path_cache.insert(key, path);
         } else if change.is_rename_new()
             && let Some(volume_id) = self.get_volume_id_for_path(Path::new(&path))
             && let Some(ref database) = self.database
@@ -819,8 +869,12 @@ impl Daemon {
 
     /// Resolve a full path from USN change data (inner version that borrows `path_cache`).
     fn resolve_usn_path_inner(&self, drive_letter: char, parent_reference: u64, name: &str) -> Option<String> {
+        let key = DirectoryCacheKey {
+            drive_letter,
+            mft_reference: parent_reference,
+        };
         // Try to get parent path from cache
-        if let Some(parent_path) = self.path_cache.get(&(drive_letter, parent_reference)) {
+        if let Some(parent_path) = self.path_cache.get(&key) {
             return Some(format!("{parent_path}\\{name}"));
         }
 
@@ -844,7 +898,10 @@ impl Daemon {
     }
 
     fn update_directory_index(&mut self, drive_letter: char, change: &UsnChange, path: &str) -> bool {
-        let key = (drive_letter, change.file_reference);
+        let key = DirectoryCacheKey {
+            drive_letter,
+            mft_reference: change.file_reference,
+        };
         if change.is_delete() {
             if let Some(ref database) = self.database
                 && let Err(error) = database.delete_files_under_path(path)
@@ -852,8 +909,9 @@ impl Daemon {
                 error!("Failed to remove deleted directory subtree {}: {}", path, error);
                 return false;
             }
-            self.path_cache
-                .retain(|(drive, _), cached_path| *drive != drive_letter || !Self::path_is_within(cached_path, path));
+            self.path_cache.retain(|cached_key, cached_path| {
+                cached_key.drive_letter != drive_letter || !Self::path_is_within(cached_path, path)
+            });
         } else if change.is_rename_new() {
             let old_path = self.path_cache.get(&key).cloned().or_else(|| {
                 let volume_id = self.get_volume_id_for_path(Path::new(path))?;
@@ -893,8 +951,8 @@ impl Daemon {
     }
 
     fn rebase_cached_paths(&mut self, drive_letter: char, old_path: &str, new_path: &str) {
-        for ((drive, _), cached_path) in &mut self.path_cache {
-            if *drive == drive_letter
+        for (cached_key, cached_path) in &mut self.path_cache {
+            if cached_key.drive_letter == drive_letter
                 && Self::path_is_within(cached_path, old_path)
                 && let Some(suffix) = cached_path.strip_prefix(old_path)
             {
@@ -905,7 +963,8 @@ impl Daemon {
 
     fn should_index_path(&self, path: &str) -> bool {
         let scope = IndexScope::from_daemon_config(&self.config.daemon);
-        let volume_mount = find_most_specific_volume(path, &self.volume_mounts).map(|(_, mount)| mount);
+        let volume_mount =
+            find_most_specific_volume(path, &self.volume_mounts).map(|volume| volume.mount_point.as_str());
         scope.is_included(path, volume_mount)
     }
 
@@ -1158,8 +1217,8 @@ impl Daemon {
     /// Get the most specific indexed volume ID for `path` using component-aware mount matching.
     fn get_volume_id_for_path(&self, path: &std::path::Path) -> Option<i64> {
         let path_str = path.to_string_lossy();
-        if let Some((volume_id, _)) = find_most_specific_volume(&path_str, &self.volume_mounts) {
-            return Some(volume_id);
+        if let Some(volume) = find_most_specific_volume(&path_str, &self.volume_mounts) {
+            return Some(volume.volume_id);
         }
 
         let db = self.database.as_ref()?;
@@ -1175,7 +1234,12 @@ impl Daemon {
         let volumes = db.get_all_volumes()?;
         self.volume_mounts = volumes
             .into_iter()
-            .filter_map(|volume| volume.id.map(|id| (id, volume.mount_point)))
+            .filter_map(|volume| {
+                volume.id.map(|volume_id| VolumeMount {
+                    volume_id,
+                    mount_point: volume.mount_point,
+                })
+            })
             .collect();
 
         // Query all directories with MFT references
@@ -1191,17 +1255,23 @@ impl Daemon {
             let mount_point: String = row.get(0)?;
             let mft_ref: i64 = row.get(1)?;
             let path: String = row.get(2)?;
-            Ok((
-                mount_point.chars().next().map(|drive| drive.to_ascii_uppercase()),
-                mft_ref as u64,
+            Ok(CachedDirectoryRow {
+                drive_letter: mount_point.chars().next().map(|drive| drive.to_ascii_uppercase()),
+                mft_reference: mft_ref as u64,
                 path,
-            ))
+            })
         })?;
 
         for entry in entries {
-            let entry = entry?;
-            if let Some(drive) = entry.0 {
-                self.path_cache.insert((drive, entry.1), entry.2);
+            let row = entry?;
+            if let Some(drive_letter) = row.drive_letter {
+                self.path_cache.insert(
+                    DirectoryCacheKey {
+                        drive_letter,
+                        mft_reference: row.mft_reference,
+                    },
+                    row.path,
+                );
             }
         }
 
@@ -1579,7 +1649,13 @@ mod tests {
                 .expect("insert entry");
         }
         daemon.database = Some(database);
-        daemon.path_cache.insert(('C', 42), "C:\\Docs\\Old".into());
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 42,
+            },
+            "C:\\Docs\\Old".into(),
+        );
         let change = UsnChange {
             usn: 1,
             file_reference: 42,
@@ -1592,7 +1668,13 @@ mod tests {
 
         assert!(daemon.handle_out_of_scope_change('C', &change, "C:\\Other\\Old".into()));
         assert_eq!(
-            daemon.path_cache.get(&('C', 42)).map(String::as_str),
+            daemon
+                .path_cache
+                .get(&DirectoryCacheKey {
+                    drive_letter: 'C',
+                    mft_reference: 42,
+                })
+                .map(String::as_str),
             Some("C:\\Other\\Old")
         );
         let database = daemon.database.as_ref().expect("database");
@@ -2322,7 +2404,13 @@ mod tests {
         let options = DaemonOptions::default();
         let mut daemon = Daemon::new(config, options);
 
-        daemon.path_cache.insert(('C', 100), "C:\\Users\\Documents".to_string());
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 100,
+            },
+            "C:\\Users\\Documents".to_string(),
+        );
 
         let result = daemon.resolve_usn_path_inner('C', 100, "report.pdf");
         assert_eq!(result, Some("C:\\Users\\Documents\\report.pdf".to_string()));
@@ -2331,8 +2419,20 @@ mod tests {
     #[test]
     fn test_resolve_usn_path_inner_reference_shared_by_drives() {
         let mut daemon = Daemon::new(Config::default(), DaemonOptions::default());
-        daemon.path_cache.insert(('C', 100), "C:\\Data".to_string());
-        daemon.path_cache.insert(('D', 100), "D:\\Backup".to_string());
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 100,
+            },
+            "C:\\Data".to_string(),
+        );
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'D',
+                mft_reference: 100,
+            },
+            "D:\\Backup".to_string(),
+        );
 
         assert_eq!(
             daemon.resolve_usn_path_inner('C', 100, "file.txt").as_deref(),
@@ -2433,7 +2533,10 @@ mod tests {
 
         directory.reason = 0x0000_0200;
         daemon.update_directory_index('C', &directory, "C:\\new");
-        assert!(!daemon.path_cache.contains_key(&('C', 200)));
+        assert!(!daemon.path_cache.contains_key(&DirectoryCacheKey {
+            drive_letter: 'C',
+            mft_reference: 200,
+        }));
         let database = daemon.database.as_ref().expect("database");
         assert!(
             database
@@ -2488,9 +2591,27 @@ mod tests {
         let options = DaemonOptions::default();
         let mut daemon = Daemon::new(config, options);
 
-        daemon.path_cache.insert(('C', 10), "C:\\Users".to_string());
-        daemon.path_cache.insert(('C', 20), "C:\\Users\\Documents".to_string());
-        daemon.path_cache.insert(('C', 30), "C:\\Program Files".to_string());
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 10,
+            },
+            "C:\\Users".to_string(),
+        );
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 20,
+            },
+            "C:\\Users\\Documents".to_string(),
+        );
+        daemon.path_cache.insert(
+            DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 30,
+            },
+            "C:\\Program Files".to_string(),
+        );
 
         assert_eq!(
             daemon.resolve_usn_path_inner('C', 10, "file1.txt"),
@@ -2889,12 +3010,24 @@ mod tests {
 
         // Only directories with mft_reference should be in cache
         assert_eq!(daemon.path_cache.len(), 2);
-        assert_eq!(daemon.path_cache.get(&('C', 100)), Some(&"C:\\Users".to_string()));
         assert_eq!(
-            daemon.path_cache.get(&('C', 200)),
+            daemon.path_cache.get(&DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 100,
+            }),
+            Some(&"C:\\Users".to_string())
+        );
+        assert_eq!(
+            daemon.path_cache.get(&DirectoryCacheKey {
+                drive_letter: 'C',
+                mft_reference: 200,
+            }),
             Some(&"C:\\Users\\Documents".to_string())
         );
-        assert!(!daemon.path_cache.contains_key(&('C', 300)));
+        assert!(!daemon.path_cache.contains_key(&DirectoryCacheKey {
+            drive_letter: 'C',
+            mft_reference: 300,
+        }));
     }
 
     #[test]

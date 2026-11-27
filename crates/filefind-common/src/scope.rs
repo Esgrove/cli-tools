@@ -24,6 +24,24 @@ pub struct IndexScope {
     pub exclude_patterns: Vec<String>,
 }
 
+/// An indexed volume's database ID paired with its stored mount point string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    /// Database row ID in the `volumes` table.
+    pub volume_id: i64,
+    /// Stored mount point or root path (for example `C:`, `\\nas\share`, or `/data/a`).
+    pub mount_point: String,
+}
+
+/// Ordering key measuring how specific an indexed root is when resolving overlapping roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RootSpecificity {
+    /// Number of non-empty path components in the root.
+    pub components: usize,
+    /// Byte length of the trimmed root string, used as a tie-breaker at equal depth.
+    pub length: usize,
+}
+
 impl IndexScope {
     /// Create a scope with explicit roots, directory exclusions, and filename glob patterns.
     #[must_use]
@@ -147,41 +165,52 @@ pub fn is_path_within_root(path: &str, root: &str) -> bool {
             .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
-/// Rank a root's specificity as `(component_count, trimmed_length)` for deterministic ownership.
+/// Rank a root's specificity for deterministic ownership.
 ///
 /// Deeper roots always win over shallower ancestors
 /// (for example `/data/sub` over `/data` over `/`, and `C:\Users` over `C:`).
 #[must_use]
-pub fn root_specificity(root: &str) -> (usize, usize) {
+pub fn root_specificity(root: &str) -> RootSpecificity {
     if is_windows_style_path(root) || cfg!(windows) {
         let normalized = root.replace('/', "\\");
         let trimmed = normalized.trim_end_matches('\\');
         if trimmed.is_empty() {
-            return (0, 0);
+            return RootSpecificity {
+                components: 0,
+                length: 0,
+            };
         }
         let components = trimmed.split('\\').filter(|part| !part.is_empty()).count();
-        return (components, trimmed.len());
+        return RootSpecificity {
+            components,
+            length: trimmed.len(),
+        };
     }
 
     let trimmed = root.trim_end_matches('/');
     if trimmed.is_empty() {
-        return (0, 0);
+        return RootSpecificity {
+            components: 0,
+            length: 0,
+        };
     }
     let components = trimmed.split('/').filter(|part| !part.is_empty()).count();
-    (components, trimmed.len())
+    RootSpecificity {
+        components,
+        length: trimmed.len(),
+    }
 }
 
-/// Find the most specific volume ID and mount point containing `path`.
+/// Find the most specific indexed volume mount containing `path`.
 ///
 /// Overlapping roots resolve deterministically to the deepest mount point,
 /// breaking exact ties by the lowest volume ID.
 #[must_use]
-pub fn find_most_specific_volume<'a>(path: &str, volumes: &'a [(i64, String)]) -> Option<(i64, &'a str)> {
+pub fn find_most_specific_volume<'a>(path: &str, volumes: &'a [VolumeMount]) -> Option<&'a VolumeMount> {
     volumes
         .iter()
-        .filter(|(_, mount_point)| is_path_within_root(path, mount_point))
-        .max_by_key(|(volume_id, mount_point)| (root_specificity(mount_point), Reverse(*volume_id)))
-        .map(|(volume_id, mount_point)| (*volume_id, mount_point.as_str()))
+        .filter(|volume| is_path_within_root(path, &volume.mount_point))
+        .max_by_key(|volume| (root_specificity(&volume.mount_point), Reverse(volume.volume_id)))
 }
 
 /// Find the most specific volume ID for `path` from a slice of [`IndexedVolume`] records.
@@ -189,12 +218,14 @@ pub fn find_most_specific_volume<'a>(path: &str, volumes: &'a [(i64, String)]) -
 pub fn find_volume_id_for_path(path: &str, volumes: &[IndexedVolume]) -> Option<i64> {
     volumes
         .iter()
-        .filter_map(|volume| {
-            let id = volume.id?;
-            is_path_within_root(path, &volume.mount_point).then_some((id, volume.mount_point.as_str()))
+        .filter(|volume| volume.id.is_some() && is_path_within_root(path, &volume.mount_point))
+        .max_by_key(|volume| {
+            (
+                root_specificity(&volume.mount_point),
+                Reverse(volume.id.unwrap_or(i64::MAX)),
+            )
         })
-        .max_by_key(|(volume_id, mount_point)| (root_specificity(mount_point), Reverse(*volume_id)))
-        .map(|(volume_id, _)| volume_id)
+        .and_then(|volume| volume.id)
 }
 
 /// Check whether `path` matches any directory or path exclusion rule from `[daemon].exclude`.
@@ -399,39 +430,60 @@ mod test_scope_roots {
     #[test]
     fn overlapping_roots_resolve_deterministically_to_deepest_owner() {
         let volumes = vec![
-            (1, "/".to_string()),
-            (2, "/data".to_string()),
-            (3, "/data/sub".to_string()),
-            (4, "/data/other".to_string()),
+            VolumeMount {
+                volume_id: 1,
+                mount_point: "/".to_string(),
+            },
+            VolumeMount {
+                volume_id: 2,
+                mount_point: "/data".to_string(),
+            },
+            VolumeMount {
+                volume_id: 3,
+                mount_point: "/data/sub".to_string(),
+            },
+            VolumeMount {
+                volume_id: 4,
+                mount_point: "/data/other".to_string(),
+            },
         ];
 
         assert_eq!(
             find_most_specific_volume("/data/sub/a.txt", &volumes),
-            Some((3, "/data/sub"))
+            Some(&volumes[2])
         );
-        assert_eq!(find_most_specific_volume("/data/top.txt", &volumes), Some((2, "/data")));
+        assert_eq!(find_most_specific_volume("/data/top.txt", &volumes), Some(&volumes[1]));
         assert_eq!(
             find_most_specific_volume("/data/other/b.txt", &volumes),
-            Some((4, "/data/other"))
+            Some(&volumes[3])
         );
         assert_eq!(
             find_most_specific_volume("/data/sub-sibling/c.txt", &volumes),
-            Some((2, "/data"))
+            Some(&volumes[1])
         );
-        assert_eq!(find_most_specific_volume("/etc/hosts", &volumes), Some((1, "/")));
+        assert_eq!(find_most_specific_volume("/etc/hosts", &volumes), Some(&volumes[0]));
     }
 
     #[test]
     fn two_unc_shares_do_not_collide() {
-        let volumes = vec![(10, r"\\nas\media".to_string()), (20, r"\\nas\backup".to_string())];
+        let volumes = vec![
+            VolumeMount {
+                volume_id: 10,
+                mount_point: r"\\nas\media".to_string(),
+            },
+            VolumeMount {
+                volume_id: 20,
+                mount_point: r"\\nas\backup".to_string(),
+            },
+        ];
 
         assert_eq!(
             find_most_specific_volume(r"\\nas\media\movie.mkv", &volumes),
-            Some((10, r"\\nas\media"))
+            Some(&volumes[0])
         );
         assert_eq!(
             find_most_specific_volume(r"\\nas\backup\archive.tar", &volumes),
-            Some((20, r"\\nas\backup"))
+            Some(&volumes[1])
         );
         assert_eq!(find_most_specific_volume(r"\\nas\other\x.txt", &volumes), None);
     }

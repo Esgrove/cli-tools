@@ -41,6 +41,14 @@ struct RootMatch {
     exact_textual: bool,
 }
 
+/// Matched database row paired with the stored path key that resolved to it.
+struct IndexedEntryMatch {
+    /// Stored path key in the index database.
+    stored_path: String,
+    /// Matching file or directory row.
+    entry: crate::types::FileEntry,
+}
+
 /// Applies completed file system changes to the filefind index database.
 pub struct IndexUpdater {
     /// The opened index database.
@@ -157,8 +165,8 @@ impl IndexUpdater {
         is_directory_hint: bool,
         stored_roots: &[String],
     ) -> Result<ChangeOutcome> {
-        let (resolved_from, is_directory) = if let Some((path, entry)) = self.find_indexed_entry(from, stored_roots)? {
-            (path, is_directory_hint || entry.is_directory)
+        let (resolved_from, is_directory) = if let Some(matched) = self.find_indexed_entry(from, stored_roots)? {
+            (matched.stored_path, is_directory_hint || matched.entry.is_directory)
         } else if is_directory_hint && let Some(path) = self.find_indexed_subtree(from, stored_roots)? {
             (path, true)
         } else {
@@ -198,11 +206,11 @@ impl IndexUpdater {
 
     /// Remove the indexed entry at `path`, and everything under it for a directory.
     fn apply_removal(&self, path: &str, is_directory: bool, stored_roots: &[String]) -> Result<ChangeOutcome> {
-        if let Some((resolved_path, entry)) = self.find_indexed_entry(path, stored_roots)? {
-            let removed = if is_directory || entry.is_directory {
-                self.database.delete_files_under_path(&resolved_path)? > 0
+        if let Some(matched) = self.find_indexed_entry(path, stored_roots)? {
+            let removed = if is_directory || matched.entry.is_directory {
+                self.database.delete_files_under_path(&matched.stored_path)? > 0
             } else {
-                self.database.delete_file_by_path(&resolved_path)?
+                self.database.delete_file_by_path(&matched.stored_path)?
             };
             return Ok(if removed {
                 ChangeOutcome::Removed
@@ -222,13 +230,12 @@ impl IndexUpdater {
     }
 
     /// Look up `path` directly in the index, falling back to aliased stored roots when absent.
-    fn find_indexed_entry(
-        &self,
-        path: &str,
-        stored_roots: &[String],
-    ) -> Result<Option<(String, crate::types::FileEntry)>> {
+    fn find_indexed_entry(&self, path: &str, stored_roots: &[String]) -> Result<Option<IndexedEntryMatch>> {
         if let Some(entry) = self.database.get_file_by_path(path)? {
-            return Ok(Some((path.to_string(), entry)));
+            return Ok(Some(IndexedEntryMatch {
+                stored_path: path.to_string(),
+                entry,
+            }));
         }
 
         let candidates = alias_candidates(path, stored_roots);
@@ -240,7 +247,10 @@ impl IndexUpdater {
                 && candidate.relative_depth == depth
             {
                 if let Some(entry) = self.database.get_file_by_path(&candidate.mapped_path)? {
-                    depth_matches.push((candidate.mapped_path.clone(), entry));
+                    depth_matches.push(IndexedEntryMatch {
+                        stored_path: candidate.mapped_path.clone(),
+                        entry,
+                    });
                 }
                 cursor += 1;
             }
@@ -287,10 +297,10 @@ impl IndexUpdater {
 
     /// Check whether `path` is on an indexed volume, inside configured roots, and not excluded.
     fn is_indexed_location(&self, path: &str) -> Result<bool> {
-        let Some((_, volume_mount)) = self.database.get_volume_for_path(path)? else {
+        let Some(volume) = self.database.get_volume_for_path(path)? else {
             return Ok(false);
         };
-        Ok(self.scope.is_included(path, Some(&volume_mount)))
+        Ok(self.scope.is_included(path, Some(&volume.mount_point)))
     }
 }
 

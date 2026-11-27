@@ -76,6 +76,25 @@ struct MenuItems {
     rescan: MenuItem,
 }
 
+/// Enabled flags for the three interactive daemon control menu items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MenuEnabledStates {
+    /// Whether "Start daemon" is enabled.
+    start: bool,
+    /// Whether "Stop daemon" is enabled.
+    stop: bool,
+    /// Whether "Rescan" is enabled.
+    rescan: bool,
+}
+
+/// Channels connecting the UI event loop to the background IPC worker thread.
+struct IpcWorkerHandle {
+    /// Sends Start, Stop, Rescan, and Shutdown commands to the worker thread.
+    command_sender: Sender<WorkerCommand>,
+    /// Receives daemon status snapshots polled by the worker thread.
+    status_receiver: Receiver<DaemonStatus>,
+}
+
 /// Run the tray application on the platform-native event loop.
 ///
 /// This function does not return under normal operation until the user selects Quit.
@@ -112,15 +131,15 @@ fn run_macos() -> Result<()> {
     application.finishLaunching();
 
     let (tray_icon, menu_items) = create_tray_icon()?;
-    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let worker = spawn_ipc_worker();
     let menu_channel = MenuEvent::receiver();
     let mut previous_state: Option<DaemonStateInfo> = None;
     let mut should_quit = false;
 
     while !should_quit {
         autoreleasepool(|_| {
-            drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
-            if drain_menu_events(menu_channel, &command_sender) {
+            drain_status_updates(&worker.status_receiver, &tray_icon, &menu_items, &mut previous_state);
+            if drain_menu_events(menu_channel, &worker.command_sender) {
                 should_quit = true;
                 return;
             }
@@ -138,7 +157,7 @@ fn run_macos() -> Result<()> {
         });
     }
 
-    let _ = command_sender.send(WorkerCommand::Shutdown);
+    let _ = worker.command_sender.send(WorkerCommand::Shutdown);
     drop(tray_icon);
     Ok(())
 }
@@ -148,15 +167,15 @@ fn run_macos() -> Result<()> {
 #[allow(unsafe_code)]
 fn run_windows() -> Result<()> {
     let (tray_icon, menu_items) = create_tray_icon()?;
-    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let worker = spawn_ipc_worker();
     let menu_channel = MenuEvent::receiver();
     let mut previous_state: Option<DaemonStateInfo> = None;
     let mut should_quit = false;
     let mut msg: MSG = unsafe { std::mem::zeroed() };
 
     while !should_quit {
-        drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
-        if drain_menu_events(menu_channel, &command_sender) {
+        drain_status_updates(&worker.status_receiver, &tray_icon, &menu_items, &mut previous_state);
+        if drain_menu_events(menu_channel, &worker.command_sender) {
             should_quit = true;
             // SAFETY: PostQuitMessage is always safe to call on the UI thread.
             unsafe {
@@ -182,7 +201,7 @@ fn run_windows() -> Result<()> {
         }
     }
 
-    let _ = command_sender.send(WorkerCommand::Shutdown);
+    let _ = worker.command_sender.send(WorkerCommand::Shutdown);
     drop(tray_icon);
     Ok(())
 }
@@ -193,7 +212,7 @@ fn run_gtk() -> Result<()> {
     gtk::init().context("Failed to initialize GTK (is a graphical display session available?)")?;
 
     let (tray_icon, menu_items) = create_tray_icon()?;
-    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let worker = spawn_ipc_worker();
     let menu_channel = MenuEvent::receiver();
     let mut previous_state: Option<DaemonStateInfo> = None;
     let mut should_quit = false;
@@ -203,8 +222,8 @@ fn run_gtk() -> Result<()> {
             gtk::main_iteration_do(false);
         }
 
-        drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
-        if drain_menu_events(menu_channel, &command_sender) {
+        drain_status_updates(&worker.status_receiver, &tray_icon, &menu_items, &mut previous_state);
+        if drain_menu_events(menu_channel, &worker.command_sender) {
             should_quit = true;
             break;
         }
@@ -212,13 +231,13 @@ fn run_gtk() -> Result<()> {
         std::thread::sleep(EVENT_POLL_INTERVAL);
     }
 
-    let _ = command_sender.send(WorkerCommand::Shutdown);
+    let _ = worker.command_sender.send(WorkerCommand::Shutdown);
     drop(tray_icon);
     Ok(())
 }
 
 /// Spawn a background worker thread that handles all synchronous IPC polling and daemon commands.
-fn spawn_ipc_worker() -> (Sender<WorkerCommand>, Receiver<DaemonStatus>) {
+fn spawn_ipc_worker() -> IpcWorkerHandle {
     let (command_sender, command_receiver) = mpsc::channel::<WorkerCommand>();
     let (status_sender, status_receiver) = mpsc::channel::<DaemonStatus>();
 
@@ -275,7 +294,10 @@ fn spawn_ipc_worker() -> (Sender<WorkerCommand>, Receiver<DaemonStatus>) {
         })
         .expect("Failed to spawn tray IPC worker thread");
 
-    (command_sender, status_receiver)
+    IpcWorkerHandle {
+        command_sender,
+        status_receiver,
+    }
 }
 
 /// Drain pending daemon status snapshots from the worker and apply the latest one to the UI.
@@ -389,13 +411,29 @@ fn create_menu() -> Result<(Menu, MenuItems)> {
     Ok((menu, menu_items))
 }
 
-/// Compute `(start_enabled, stop_enabled, rescan_enabled)` for a daemon state.
-const fn menu_enabled_states(state: DaemonStateInfo) -> (bool, bool, bool) {
+/// Compute enabled states for the interactive daemon control menu items.
+const fn menu_enabled_states(state: DaemonStateInfo) -> MenuEnabledStates {
     match state {
-        DaemonStateInfo::Stopped => (true, false, false),
-        DaemonStateInfo::Running => (false, true, true),
-        DaemonStateInfo::Scanning => (false, true, false),
-        DaemonStateInfo::Starting | DaemonStateInfo::Stopping => (false, false, false),
+        DaemonStateInfo::Stopped => MenuEnabledStates {
+            start: true,
+            stop: false,
+            rescan: false,
+        },
+        DaemonStateInfo::Running => MenuEnabledStates {
+            start: false,
+            stop: true,
+            rescan: true,
+        },
+        DaemonStateInfo::Scanning => MenuEnabledStates {
+            start: false,
+            stop: true,
+            rescan: false,
+        },
+        DaemonStateInfo::Starting | DaemonStateInfo::Stopping => MenuEnabledStates {
+            start: false,
+            stop: false,
+            rescan: false,
+        },
     }
 }
 
@@ -449,10 +487,10 @@ fn apply_tray_status(
     let status_text = format_status_menu_text(status);
     menu_items.status.set_text(status_text);
 
-    let (start_enabled, stop_enabled, rescan_enabled) = menu_enabled_states(current_state);
-    menu_items.start.set_enabled(start_enabled);
-    menu_items.stop.set_enabled(stop_enabled);
-    menu_items.rescan.set_enabled(rescan_enabled);
+    let enabled = menu_enabled_states(current_state);
+    menu_items.start.set_enabled(enabled.start);
+    menu_items.stop.set_enabled(enabled.stop);
+    menu_items.rescan.set_enabled(enabled.rescan);
 
     Some(current_state)
 }
@@ -706,11 +744,46 @@ mod test_tray_state_and_daemon_lookup {
 
     #[test]
     fn menu_enabled_states_match_every_daemon_lifecycle_state() {
-        assert_eq!(menu_enabled_states(DaemonStateInfo::Stopped), (true, false, false));
-        assert_eq!(menu_enabled_states(DaemonStateInfo::Starting), (false, false, false));
-        assert_eq!(menu_enabled_states(DaemonStateInfo::Running), (false, true, true));
-        assert_eq!(menu_enabled_states(DaemonStateInfo::Scanning), (false, true, false));
-        assert_eq!(menu_enabled_states(DaemonStateInfo::Stopping), (false, false, false));
+        assert_eq!(
+            menu_enabled_states(DaemonStateInfo::Stopped),
+            MenuEnabledStates {
+                start: true,
+                stop: false,
+                rescan: false,
+            }
+        );
+        assert_eq!(
+            menu_enabled_states(DaemonStateInfo::Starting),
+            MenuEnabledStates {
+                start: false,
+                stop: false,
+                rescan: false,
+            }
+        );
+        assert_eq!(
+            menu_enabled_states(DaemonStateInfo::Running),
+            MenuEnabledStates {
+                start: false,
+                stop: true,
+                rescan: true,
+            }
+        );
+        assert_eq!(
+            menu_enabled_states(DaemonStateInfo::Scanning),
+            MenuEnabledStates {
+                start: false,
+                stop: true,
+                rescan: false,
+            }
+        );
+        assert_eq!(
+            menu_enabled_states(DaemonStateInfo::Stopping),
+            MenuEnabledStates {
+                start: false,
+                stop: false,
+                rescan: false,
+            }
+        );
     }
 
     #[test]
