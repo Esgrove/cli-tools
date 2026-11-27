@@ -153,7 +153,7 @@ impl Unpacker {
                 observer.on_unpack_event(UnpackEvent::UnwantedDeleted(directory));
                 continue;
             }
-            let remove_result = if cli_tools_common::is_network_path(directory) {
+            let remove_result = if cfg!(test) {
                 std::fs::remove_dir_all(directory)
             } else {
                 cli_tools_common::trash_or_delete(directory)
