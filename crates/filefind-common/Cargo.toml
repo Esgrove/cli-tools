@@ -29,6 +29,8 @@ tracing-subscriber = { workspace = true }
 [features]
 # The daemon IPC protocol used by the daemon and the tray, left out by index database users.
 ipc = ["dep:postcard"]
+# The index fixture for tests of tools that update the index.
+test-support = []
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

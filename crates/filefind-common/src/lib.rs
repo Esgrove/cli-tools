@@ -23,6 +23,8 @@ pub mod database;
 pub mod index_updates;
 #[cfg(feature = "ipc")]
 pub mod ipc;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod types;
 
 pub use config::{CONFIG_PATH, CONFIG_PATH_ENV, DATABASE_PATH_ENV, LogLevel, PathMapping, UserConfig as Config};

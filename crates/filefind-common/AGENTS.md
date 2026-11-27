@@ -17,6 +17,7 @@ The other filefind crates have their own `AGENTS.md`:
 - `database/schema.rs` - Versioned index schema, migrated as the `filefind_index` component of `cli-tools-db`
 - `index_updates.rs` - `IndexUpdater`, which applies the moves and removals other tools report as `PathChange`
 - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
+- `test_support.rs` - `IndexFixture` for tests of tools that update the index, behind the `test-support` feature
 - `types.rs` - File entries, volumes, and file change events
 
 ## Database
