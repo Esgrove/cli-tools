@@ -925,16 +925,40 @@ impl Daemon {
                 debug!("File deleted: {}", path.display());
 
                 let path_str = path.to_string_lossy();
-                if let Err(error) = db.delete_file_by_path(&path_str) {
-                    error!("Failed to delete file {}: {}", path.display(), error);
+                let is_directory = match db.get_file_by_path(&path_str) {
+                    Ok(entry) => entry.is_some_and(|entry| entry.is_directory),
+                    Err(error) => {
+                        error!("Failed to look up deleted path {}: {}", path.display(), error);
+                        return false;
+                    }
+                };
+                // A deleted directory takes everything indexed under it along.
+                let result = if is_directory {
+                    db.delete_files_under_path(&path_str).map(|_| ())
+                } else {
+                    db.delete_file_by_path(&path_str).map(|_| ())
+                };
+                if let Err(error) = result {
+                    error!("Failed to delete {}: {}", path.display(), error);
                     return false;
                 }
             }
             FileChangeEvent::Renamed { from, to } => {
                 debug!("File renamed: {} -> {}", from.display(), to.display());
 
-                // Delete old entry
                 let from_str = from.to_string_lossy();
+                let previous = match db.get_file_by_path(&from_str) {
+                    Ok(previous) => previous,
+                    Err(error) => {
+                        error!("Failed to look up renamed path {}: {}", from.display(), error);
+                        return false;
+                    }
+                };
+                if previous.is_some_and(|entry| entry.is_directory) {
+                    return Self::rename_indexed_directory(db, &from, &to);
+                }
+
+                // Delete old entry
                 if let Err(error) = db.delete_file_by_path(&from_str) {
                     error!("Failed to delete old path {}: {}", from.display(), error);
                     return false;
@@ -959,6 +983,43 @@ impl Daemon {
             }
         }
         true
+    }
+
+    /// Move an indexed directory and every entry under it to the renamed path.
+    ///
+    /// Entries already indexed under the new path are stale, since the renamed directory now occupies it,
+    /// so they are removed first to keep the full paths unique.
+    fn rename_indexed_directory(db: &Database, from: &Path, to: &Path) -> bool {
+        let from_str = from.to_string_lossy();
+        let to_str = to.to_string_lossy();
+        let new_name = to
+            .file_name()
+            .map_or_else(|| to_str.to_string(), |name| name.to_string_lossy().to_string());
+
+        if let Err(error) = db.delete_files_under_path(&to_str) {
+            error!("Failed to clear stale entries under {}: {}", to.display(), error);
+            return false;
+        }
+        match db.rebase_files_under_path(&from_str, &to_str, &new_name) {
+            Ok(moved) => {
+                debug!(
+                    "Moved {} indexed entries from {} to {}",
+                    moved,
+                    from.display(),
+                    to.display()
+                );
+                true
+            }
+            Err(error) => {
+                error!(
+                    "Failed to move indexed directory {} -> {}: {}",
+                    from.display(),
+                    to.display(),
+                    error
+                );
+                false
+            }
+        }
     }
 
     /// Get the volume ID for a given path by looking up the drive letter.
@@ -3129,6 +3190,172 @@ mod tests {
         let db = daemon.database.as_ref().expect("database should exist");
         let results = db.search_by_name("old_name.txt", 10).expect("search failed");
         assert!(results.is_empty(), "Old file should have been deleted from database");
+    }
+
+    fn daemon_with_indexed_directory() -> Daemon {
+        let mut daemon = Daemon::new(Config::default(), DaemonOptions::default());
+        let database = Database::open_in_memory().expect("open database");
+        let volume_id = database
+            .upsert_volume(&IndexedVolume {
+                id: None,
+                serial_number: "SN-WATCHED".to_string(),
+                label: None,
+                mount_point: "C:".to_string(),
+                volume_type: VolumeType::Network,
+                is_online: true,
+                last_scan_time: None,
+                last_usn: None,
+            })
+            .expect("insert volume");
+        for (full_path, is_directory) in [
+            (r"C:\old_dir", true),
+            (r"C:\old_dir\a.txt", false),
+            (r"C:\old_dir\sub", true),
+            (r"C:\old_dir\sub\b.txt", false),
+            (r"C:\other\c.txt", false),
+        ] {
+            let name = full_path.rsplit('\\').next().expect("file name");
+            database
+                .insert_file(&FileEntry {
+                    id: None,
+                    volume_id,
+                    parent_id: None,
+                    name: name.to_string(),
+                    full_path: full_path.to_string(),
+                    is_directory,
+                    size: 1,
+                    created_time: None,
+                    modified_time: None,
+                    mft_reference: None,
+                })
+                .expect("insert entry");
+        }
+        daemon.database = Some(database);
+        daemon
+    }
+
+    fn indexed_paths(daemon: &Daemon) -> Vec<String> {
+        let database = daemon.database.as_ref().expect("database");
+        let mut paths: Vec<String> = database
+            .search_by_path("", 100)
+            .expect("list entries")
+            .into_iter()
+            .map(|entry| entry.full_path)
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn test_watcher_directory_rename_moves_its_descendants() {
+        let daemon = daemon_with_indexed_directory();
+
+        assert!(daemon.handle_change_event_with_reference(
+            FileChangeEvent::Renamed {
+                from: PathBuf::from(r"C:\old_dir"),
+                to: PathBuf::from(r"C:\new_dir"),
+            },
+            None
+        ));
+
+        assert_eq!(
+            indexed_paths(&daemon),
+            vec![
+                r"C:\new_dir",
+                r"C:\new_dir\a.txt",
+                r"C:\new_dir\sub",
+                r"C:\new_dir\sub\b.txt",
+                r"C:\other\c.txt",
+            ]
+        );
+        let renamed = daemon
+            .database
+            .as_ref()
+            .expect("database")
+            .get_file_by_path(r"C:\new_dir")
+            .expect("look up renamed directory")
+            .expect("renamed directory is indexed");
+        assert_eq!(renamed.name, "new_dir");
+        assert!(renamed.is_directory);
+    }
+
+    #[test]
+    fn test_watcher_directory_delete_removes_its_descendants() {
+        let daemon = daemon_with_indexed_directory();
+
+        assert!(
+            daemon.handle_change_event_with_reference(FileChangeEvent::Deleted(PathBuf::from(r"C:\old_dir")), None)
+        );
+
+        assert_eq!(indexed_paths(&daemon), vec![r"C:\other\c.txt"]);
+    }
+
+    #[test]
+    fn test_watcher_file_rename_moves_the_entry_when_the_file_exists() {
+        let temp_dir = TempDir::new().expect("create temp directory");
+        let old_path = temp_dir.path().join("old.txt");
+        let new_path = temp_dir.path().join("new.txt");
+        std::fs::write(&new_path, "renamed contents").expect("write renamed file");
+        let old_path_string = old_path.to_string_lossy().to_string();
+        let mount_point = if cfg!(windows) {
+            old_path_string.chars().take(2).collect::<String>()
+        } else {
+            "/".to_string()
+        };
+        let mut daemon = Daemon::new(Config::default(), DaemonOptions::default());
+        let database = Database::open_in_memory().expect("open database");
+        let volume_id = database
+            .upsert_volume(&IndexedVolume {
+                id: None,
+                serial_number: "SN-FILE-RENAME".to_string(),
+                label: None,
+                mount_point,
+                volume_type: VolumeType::Network,
+                is_online: true,
+                last_scan_time: None,
+                last_usn: None,
+            })
+            .expect("insert volume");
+        database
+            .insert_file(&FileEntry {
+                id: None,
+                volume_id,
+                parent_id: None,
+                name: "old.txt".to_string(),
+                full_path: old_path_string.clone(),
+                is_directory: false,
+                size: 3,
+                created_time: None,
+                modified_time: None,
+                mft_reference: None,
+            })
+            .expect("insert entry");
+        daemon.database = Some(database);
+        if !cfg!(windows) {
+            daemon.volume_ids.insert('/', volume_id);
+        }
+
+        assert!(daemon.handle_change_event_with_reference(
+            FileChangeEvent::Renamed {
+                from: old_path,
+                to: new_path.clone(),
+            },
+            None
+        ));
+
+        let database = daemon.database.as_ref().expect("database");
+        assert!(
+            database
+                .get_file_by_path(&old_path_string)
+                .expect("look up old")
+                .is_none()
+        );
+        let renamed = database
+            .get_file_by_path(&new_path.to_string_lossy())
+            .expect("look up new")
+            .expect("renamed file is indexed");
+        assert_eq!(renamed.name, "new.txt");
+        assert_eq!(renamed.size, "renamed contents".len() as u64);
     }
 
     // --- Integration-style: build_path_cache then resolve ---
