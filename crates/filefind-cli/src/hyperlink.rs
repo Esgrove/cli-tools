@@ -12,7 +12,7 @@ use std::env;
 use std::fmt::Write;
 use std::io::IsTerminal;
 
-use filefind::config::HyperlinkMode;
+use filefind_common::config::HyperlinkMode;
 
 /// Opening delimiter of an OSC 8 hyperlink sequence.
 const HYPERLINK_START: &str = "\x1b]8;;";

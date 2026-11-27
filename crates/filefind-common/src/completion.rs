@@ -16,7 +16,7 @@ use clap_complete::Shell;
 /// ```no_run
 /// use clap::Command;
 /// use clap_complete::Shell;
-/// use filefind::generate_shell_completion;
+/// use filefind_common::generate_shell_completion;
 ///
 /// let command = Command::new("myapp").about("example app");
 /// // Print the Bash completion script to stdout

@@ -15,9 +15,9 @@ use anyhow::bail;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
-use filefind::config::HyperlinkMode;
-use filefind::database::Database;
-use filefind::{generate_shell_completion, print_error};
+use filefind_common::config::HyperlinkMode;
+use filefind_common::database::Database;
+use filefind_common::{generate_shell_completion, print_error};
 
 use crate::config::CliConfig;
 

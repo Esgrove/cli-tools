@@ -37,7 +37,7 @@ use windows::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-use filefind::{DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, Database, get_ipc_path};
+use filefind_common::{DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, Database, get_ipc_path};
 
 /// Atomic wrapper for daemon state.
 pub struct AtomicDaemonState(AtomicU8);
@@ -577,7 +577,7 @@ pub fn spawn_ipc_server_with_path(
 mod tests {
     use std::thread;
 
-    use filefind::{FileEntry, IndexedVolume, VolumeType};
+    use filefind_common::{FileEntry, IndexedVolume, VolumeType};
 
     use super::*;
 
@@ -876,7 +876,7 @@ mod tests {
         let (sender, _receiver) = mpsc::channel(32);
 
         let server = IpcServer::new(state, sender, shutdown);
-        assert_eq!(server.effective_pipe_path(), filefind::get_ipc_path());
+        assert_eq!(server.effective_pipe_path(), filefind_common::get_ipc_path());
     }
 
     #[test]
@@ -1441,8 +1441,8 @@ mod tests {
     }
 
     /// Helper: create an `IpcClient` pointed at a test pipe.
-    fn test_client(pipe_path: &Path) -> filefind::IpcClient {
-        filefind::IpcClient::new().with_pipe_path(pipe_path.to_path_buf())
+    fn test_client(pipe_path: &Path) -> filefind_common::IpcClient {
+        filefind_common::IpcClient::new().with_pipe_path(pipe_path.to_path_buf())
     }
 
     /// Send a command with retries to handle the brief window between named pipe instances
@@ -1452,7 +1452,7 @@ mod tests {
     /// so a client connecting during that gap gets "file not found".
     /// This helper retries with short back-off to tolerate that race.
     fn send_command_retry(
-        client: &filefind::IpcClient,
+        client: &filefind_common::IpcClient,
         command: DaemonCommand,
         max_attempts: u32,
     ) -> anyhow::Result<DaemonResponse> {

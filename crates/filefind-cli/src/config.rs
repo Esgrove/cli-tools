@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use regex::Regex;
 
-use filefind::config::{OutputFormat, UserConfig};
-use filefind::{build_path_mappings, resolve_unc_to_mapped_path};
+use filefind_common::config::{OutputFormat, UserConfig};
+use filefind_common::{build_path_mappings, resolve_unc_to_mapped_path};
 
 use crate::hyperlink::Hyperlinker;
 use crate::{Command, FileFindCli, OutputFormatArg, SortBy};
@@ -244,7 +244,7 @@ impl From<OutputFormatArg> for OutputFormat {
 
 #[cfg(test)]
 mod tests {
-    use filefind::config::HyperlinkMode;
+    use filefind_common::config::HyperlinkMode;
 
     use super::*;
     use crate::FileFindCli;

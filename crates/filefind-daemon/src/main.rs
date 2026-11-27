@@ -24,7 +24,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[cfg(windows)]
 use windows::Win32::System::Console::FreeConsole;
 
-use filefind::{Config, LogLevel, format_number, get_log_directory, print_cyan, print_success};
+use filefind_common::{Config, LogLevel, format_number, get_log_directory, print_cyan, print_success};
 
 /// Background file indexing daemon for filefind
 #[derive(Parser)]
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
     let args = DaemonCli::parse();
 
     if let Some(Command::Completion { shell, install }) = &args.command {
-        return filefind::generate_shell_completion(
+        return filefind_common::generate_shell_completion(
             *shell,
             DaemonCli::command(),
             *install,
@@ -286,7 +286,7 @@ fn run_prune(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let database = filefind::Database::open(&database_path)?;
+    let database = filefind_common::Database::open(&database_path)?;
 
     print_cyan!("Pruning database entries for missing files and directories...");
 

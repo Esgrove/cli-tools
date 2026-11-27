@@ -16,8 +16,8 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use filefind::types::FileChangeEvent;
-use filefind::{extract_drive_letter, get_persistent_drive_mapping, is_unc_path, normalize_drive_root};
+use filefind_common::types::FileChangeEvent;
+use filefind_common::{extract_drive_letter, get_persistent_drive_mapping, is_unc_path, normalize_drive_root};
 
 /// Default debounce duration to coalesce rapid file changes.
 const DEFAULT_DEBOUNCE_MS: u64 = 1000;
@@ -368,8 +368,8 @@ impl Default for FileWatcher {
 impl ScanEntry {
     /// Convert to a `FileEntry` for database storage, consuming self.
     #[must_use]
-    pub fn into_file_entry(self, volume_id: i64) -> filefind::types::FileEntry {
-        filefind::types::FileEntry {
+    pub fn into_file_entry(self, volume_id: i64) -> filefind_common::types::FileEntry {
+        filefind_common::types::FileEntry {
             id: None,
             volume_id,
             parent_id: None,

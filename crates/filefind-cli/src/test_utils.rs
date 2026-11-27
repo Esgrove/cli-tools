@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use filefind::FileEntry;
+use filefind_common::FileEntry;
 
 /// Build a platform-native absolute test path:
 /// `native_path(&["Dir", "file.txt"])` yields `C:\Dir\file.txt` on Windows and `/Dir/file.txt` on Unix.

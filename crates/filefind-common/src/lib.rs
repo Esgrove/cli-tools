@@ -81,7 +81,7 @@ impl std::fmt::Display for PathType {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::{classify_path, PathType};
+/// use filefind_common::{classify_path, PathType};
 ///
 /// assert_eq!(classify_path(Path::new(r"\\server\share")), PathType::UncPath);
 /// assert_eq!(classify_path(Path::new(r"C:\Users\Documents")), PathType::LocalDirectory);
@@ -107,7 +107,7 @@ pub fn classify_path(path: &Path) -> PathType {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::is_unc_path;
+/// use filefind_common::is_unc_path;
 ///
 /// assert!(is_unc_path(Path::new(r"\\server\share\folder")));
 /// assert!(!is_unc_path(Path::new(r"C:\Users")));
@@ -127,7 +127,7 @@ pub fn is_unc_path(path: &Path) -> bool {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::is_mapped_network_drive;
+/// use filefind_common::is_mapped_network_drive;
 ///
 /// // UNC paths are never considered mapped drives
 /// assert!(!is_mapped_network_drive(Path::new(r"\\server\share")));
@@ -173,7 +173,7 @@ pub fn is_mapped_network_drive(path: &Path) -> bool {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::is_mapped_network_drive;
+/// use filefind_common::is_mapped_network_drive;
 ///
 /// // Non-Windows always returns false
 /// assert!(!is_mapped_network_drive(Path::new(r"Z:\")));
@@ -193,7 +193,7 @@ pub const fn is_mapped_network_drive(_path: &Path) -> bool {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::is_drive_root;
+/// use filefind_common::is_drive_root;
 ///
 /// assert!(is_drive_root(Path::new(r"C:\")));
 /// assert!(is_drive_root(Path::new("D:")));
@@ -218,7 +218,7 @@ pub fn is_drive_root(path: &Path) -> bool {
 /// # Examples
 ///
 /// ```
-/// use filefind::extract_drive_letter_from_str;
+/// use filefind_common::extract_drive_letter_from_str;
 ///
 /// assert_eq!(extract_drive_letter_from_str(r"C:\Users"), Some('C'));
 /// assert_eq!(extract_drive_letter_from_str("x:"), Some('X'));
@@ -242,7 +242,7 @@ pub fn extract_drive_letter_from_str(path: &str) -> Option<char> {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::extract_drive_letter;
+/// use filefind_common::extract_drive_letter;
 ///
 /// assert_eq!(extract_drive_letter(Path::new(r"C:\Users")), Some('C'));
 /// assert_eq!(extract_drive_letter(Path::new("x:")), Some('X'));
@@ -269,7 +269,7 @@ pub fn extract_drive_letter(path: &Path) -> Option<char> {
 ///
 /// ```
 /// use std::path::{Path, PathBuf};
-/// use filefind::normalize_drive_root;
+/// use filefind_common::normalize_drive_root;
 ///
 /// assert_eq!(normalize_drive_root(Path::new("X:")), PathBuf::from(r"X:\"));
 /// assert_eq!(normalize_drive_root(Path::new("x:")), PathBuf::from(r"X:\"));
@@ -300,7 +300,7 @@ pub fn normalize_drive_root(path: &Path) -> PathBuf {
 ///
 /// ```
 /// use std::path::Path;
-/// use filefind::is_network_path;
+/// use filefind_common::is_network_path;
 ///
 /// assert!(is_network_path(Path::new(r"\\server\share")));
 /// assert!(!is_network_path(Path::new(r"C:\Users")));
@@ -322,7 +322,7 @@ pub fn is_network_path(path: &Path) -> bool {
 /// # Examples
 ///
 /// ```
-/// # use filefind::get_volume_prefix;
+/// # use filefind_common::get_volume_prefix;
 /// assert_eq!(get_volume_prefix(r"C:\Users\foo"), Some("c:".to_string()));
 /// assert_eq!(get_volume_prefix(r"\\?\D:\data"), Some("d:".to_string()));
 /// assert_eq!(get_volume_prefix(r"\\server\share\folder"), Some(r"\\server\share".to_string()));
@@ -358,7 +358,7 @@ pub fn get_volume_prefix(path: &str) -> Option<String> {
 /// # Examples
 ///
 /// ```
-/// use filefind::get_unc_for_drive;
+/// use filefind_common::get_unc_for_drive;
 ///
 /// // Local drives return None
 /// let result = get_unc_for_drive('C');
@@ -396,7 +396,7 @@ pub fn get_unc_for_drive(drive_letter: char) -> Option<String> {
 /// # Examples
 ///
 /// ```
-/// use filefind::get_unc_for_drive;
+/// use filefind_common::get_unc_for_drive;
 ///
 /// // Non-Windows always returns None
 /// assert_eq!(get_unc_for_drive('X'), None);
@@ -418,7 +418,7 @@ pub const fn get_unc_for_drive(_drive_letter: char) -> Option<String> {
 /// # Examples
 ///
 /// ```
-/// use filefind::get_persistent_drive_mapping;
+/// use filefind_common::get_persistent_drive_mapping;
 ///
 /// // Drive letters without a persistent mapping return None
 /// let result = get_persistent_drive_mapping('C');
@@ -486,7 +486,7 @@ pub fn get_persistent_drive_mapping(drive_letter: char) -> Option<String> {
 /// # Examples
 ///
 /// ```
-/// use filefind::get_persistent_drive_mapping;
+/// use filefind_common::get_persistent_drive_mapping;
 ///
 /// // Non-Windows always returns None
 /// assert_eq!(get_persistent_drive_mapping('X'), None);
@@ -509,7 +509,7 @@ pub const fn get_persistent_drive_mapping(_drive_letter: char) -> Option<String>
 /// # Examples
 ///
 /// ```
-/// use filefind::get_drive_mappings;
+/// use filefind_common::get_drive_mappings;
 ///
 /// // On a system without mapped network drives, returns an empty map
 /// let mappings = get_drive_mappings(&[]);
@@ -539,7 +539,7 @@ pub fn get_drive_mappings(drive_letters: &[char]) -> HashMap<String, char> {
 /// # Examples
 ///
 /// ```
-/// use filefind::{build_path_mappings, PathMapping};
+/// use filefind_common::{build_path_mappings, PathMapping};
 ///
 /// let manual = vec![PathMapping {
 ///     unc: r"\\server\share".to_string(),
@@ -585,7 +585,7 @@ pub fn build_path_mappings(drive_letters: &[char], manual_mappings: &[PathMappin
 ///
 /// ```
 /// use std::collections::HashMap;
-/// use filefind::resolve_unc_to_mapped_path;
+/// use filefind_common::resolve_unc_to_mapped_path;
 ///
 /// let mut mappings = HashMap::new();
 /// mappings.insert(r"\\server\share".to_string(), "X:".to_string());
@@ -616,7 +616,7 @@ pub fn resolve_unc_to_mapped_path<S: BuildHasher>(path: &str, mappings: &HashMap
 /// # Examples
 ///
 /// ```
-/// use filefind::strip_prefix_ignore_case;
+/// use filefind_common::strip_prefix_ignore_case;
 ///
 /// assert_eq!(strip_prefix_ignore_case(r"\\Server\Share\File.txt", r"\\server\share"), Some(r"\File.txt"));
 /// assert_eq!(strip_prefix_ignore_case(r"\\other\share", r"\\server"), None);
@@ -640,7 +640,7 @@ pub fn strip_prefix_ignore_case<'a>(text: &'a str, prefix_lower: &str) -> Option
 /// # Examples
 ///
 /// ```
-/// let log_dir = filefind::get_log_directory().expect("should resolve home dir");
+/// let log_dir = filefind_common::get_log_directory().expect("should resolve home dir");
 /// assert!(log_dir.ends_with("logs/filefind") || log_dir.ends_with(r"logs\filefind"));
 /// ```
 ///

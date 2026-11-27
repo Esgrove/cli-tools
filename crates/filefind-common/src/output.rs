@@ -7,7 +7,7 @@ use colored::Colorize;
 /// # Examples
 ///
 /// ```
-/// filefind::print_error("something went wrong");
+/// filefind_common::print_error("something went wrong");
 /// ```
 pub fn print_error(message: &str) {
     eprintln!("{}", message.red());
@@ -26,7 +26,7 @@ macro_rules! print_error {
 /// # Examples
 ///
 /// ```
-/// filefind::print_warning("this might be a problem");
+/// filefind_common::print_warning("this might be a problem");
 /// ```
 pub fn print_warning(message: &str) {
     eprintln!("{}", message.yellow());
@@ -45,7 +45,7 @@ macro_rules! print_warning {
 /// # Examples
 ///
 /// ```
-/// filefind::print_success("operation completed");
+/// filefind_common::print_success("operation completed");
 /// ```
 pub fn print_success(message: &str) {
     println!("{}", message.green());
@@ -64,7 +64,7 @@ macro_rules! print_success {
 /// # Examples
 ///
 /// ```
-/// filefind::print_cyan("indexing files...");
+/// filefind_common::print_cyan("indexing files...");
 /// ```
 pub fn print_cyan(message: &str) {
     println!("{}", message.cyan());
@@ -83,7 +83,7 @@ macro_rules! print_cyan {
 /// # Examples
 ///
 /// ```
-/// filefind::print_bold_magenta("highlighted info");
+/// filefind_common::print_bold_magenta("highlighted info");
 /// ```
 pub fn print_bold_magenta(message: &str) {
     println!("{}", message.bold().magenta());
@@ -102,7 +102,7 @@ macro_rules! print_bold_magenta {
 /// # Examples
 ///
 /// ```
-/// filefind::print_bold_yellow("important notice");
+/// filefind_common::print_bold_yellow("important notice");
 /// ```
 pub fn print_bold_yellow(message: &str) {
     println!("{}", message.bold().yellow());
@@ -121,7 +121,7 @@ macro_rules! print_bold_yellow {
 /// # Examples
 ///
 /// ```
-/// filefind::print_bold_red("critical error");
+/// filefind_common::print_bold_red("critical error");
 /// ```
 pub fn print_bold_red(message: &str) {
     println!("{}", message.bold().red());
@@ -142,7 +142,7 @@ macro_rules! print_bold_red {
 /// # Examples
 ///
 /// ```
-/// use filefind::format_size;
+/// use filefind_common::format_size;
 ///
 /// assert_eq!(format_size(0), "0 B");
 /// assert_eq!(format_size(512), "512 B");
@@ -175,7 +175,7 @@ pub fn format_size(bytes: u64) -> String {
 /// # Examples
 ///
 /// ```
-/// use filefind::format_number;
+/// use filefind_common::format_number;
 ///
 /// assert_eq!(format_number(0), "0");
 /// assert_eq!(format_number(999), "999");

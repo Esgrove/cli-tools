@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use filefind::{Database, extract_drive_letter_from_str};
+use filefind_common::{Database, extract_drive_letter_from_str};
 use rayon::prelude::*;
 use tracing::{debug, info, trace};
 
@@ -543,8 +543,8 @@ fn delete_entries_by_ids(database: &Database, ids: &[i64]) -> Result<u64> {
 mod tests {
     use std::fs::{self, File};
 
-    use filefind::FileEntry;
-    use filefind::types::{IndexedVolume, VolumeType};
+    use filefind_common::FileEntry;
+    use filefind_common::types::{IndexedVolume, VolumeType};
     use tempfile::tempdir;
 
     use super::*;

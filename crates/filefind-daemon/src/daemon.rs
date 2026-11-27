@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use filefind::{
+use filefind_common::{
     Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IpcClient, extract_drive_letter_from_str,
     format_number, print_cyan, print_error, print_success, print_warning,
 };
@@ -1205,7 +1205,7 @@ pub fn show_status(config: &Config) -> Result<()> {
     if database_path.exists() {
         println!("  Database:     {}", database_path.display());
         if let Ok(metadata) = std::fs::metadata(&database_path) {
-            println!("  DB size:      {}", filefind::format_size(metadata.len()));
+            println!("  DB size:      {}", filefind_common::format_size(metadata.len()));
         }
     }
 
@@ -1249,13 +1249,13 @@ pub fn show_stats(config: &Config) -> Result<()> {
     println!("  Files:          {}", format_number(stats.total_files));
     println!("  Directories:    {}", format_number(stats.total_directories));
     println!("  Volumes:        {}", stats.volume_count);
-    println!("  Total size:     {}", filefind::format_size(stats.total_size));
+    println!("  Total size:     {}", filefind_common::format_size(stats.total_size));
     println!();
     println!("  Database:       {}", database_path.display());
 
     // Show database file size
     if let Ok(metadata) = std::fs::metadata(&database_path) {
-        println!("  DB file size:   {}", filefind::format_size(metadata.len()));
+        println!("  DB file size:   {}", filefind_common::format_size(metadata.len()));
     }
 
     Ok(())
@@ -1310,7 +1310,7 @@ pub fn list_volumes(database_path: &Path, detailed: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use filefind::{FileEntry, IndexedVolume, VolumeType};
+    use filefind_common::{FileEntry, IndexedVolume, VolumeType};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -1590,7 +1590,7 @@ mod tests {
         let daemon = Daemon::new(config, options);
 
         // IPC state should be initialized
-        assert_eq!(daemon.ipc_state.state.load(), filefind::DaemonStateInfo::Stopped);
+        assert_eq!(daemon.ipc_state.state.load(), filefind_common::DaemonStateInfo::Stopped);
         assert!(!daemon.ipc_state.is_paused.load(std::sync::atomic::Ordering::Relaxed));
     }
 

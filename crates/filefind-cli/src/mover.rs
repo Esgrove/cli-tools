@@ -26,11 +26,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-use filefind::database::Database;
+use filefind_common::database::Database;
 #[cfg(windows)]
-use filefind::get_volume_prefix;
-use filefind::types::FileEntry;
-use filefind::{
+use filefind_common::get_volume_prefix;
+use filefind_common::types::FileEntry;
+use filefind_common::{
     extract_drive_letter, format_size, get_unc_for_drive, print_error, print_success, print_warning,
     strip_prefix_ignore_case,
 };
@@ -1013,7 +1013,7 @@ mod tests {
 
     use super::*;
     use crate::test_utils::{make_file, native_path};
-    use filefind::types::{IndexedVolume, VolumeType};
+    use filefind_common::types::{IndexedVolume, VolumeType};
 
     // --- cross_device_size tests ---
     // The volume-prefix comparison tests are Windows-only.

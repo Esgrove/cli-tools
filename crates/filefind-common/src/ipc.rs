@@ -415,7 +415,7 @@ impl Default for IpcClient {
 /// # Examples
 ///
 /// ```
-/// let path = filefind::get_ipc_path();
+/// let path = filefind_common::get_ipc_path();
 /// assert!(!path.as_os_str().is_empty());
 /// ```
 #[must_use]
@@ -430,7 +430,7 @@ pub fn get_ipc_path() -> &'static PathBuf {
 /// # Examples
 ///
 /// ```
-/// use filefind::write_message;
+/// use filefind_common::write_message;
 ///
 /// let mut buffer = Vec::new();
 /// write_message(&mut buffer, b"hello").expect("write should succeed");
@@ -458,7 +458,7 @@ pub fn write_message<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
 /// # Examples
 ///
 /// ```
-/// use filefind::{write_message, read_message};
+/// use filefind_common::{write_message, read_message};
 /// use std::io::Cursor;
 ///
 /// // Write a message, then read it back

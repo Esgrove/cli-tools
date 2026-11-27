@@ -13,7 +13,7 @@ name = "filefind"
 path = "src/main.rs"
 
 [dependencies]
-filefind = { workspace = true }
+filefind-common = { workspace = true }
 
 anyhow = { workspace = true }
 blake3 = "1.8.7"

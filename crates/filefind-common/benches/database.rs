@@ -5,8 +5,8 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use filefind::database::Database;
-use filefind::types::{FileEntry, IndexedVolume, VolumeType};
+use filefind_common::database::Database;
+use filefind_common::types::{FileEntry, IndexedVolume, VolumeType};
 
 fn database_with_volume() -> (Database, i64) {
     let database = Database::open_in_memory().expect("open benchmark database");

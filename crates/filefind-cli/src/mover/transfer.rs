@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use indicatif::ProgressBar;
 
-use filefind::print_warning;
+use filefind_common::print_warning;
 
 use super::COPY_BUFFER_SIZE;
 

@@ -8,9 +8,9 @@ use anyhow::{Result, bail};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-use filefind::config::OutputFormat;
-use filefind::types::FileEntry;
-use filefind::{Database, IndexedVolume, format_number, format_size, print_bold_magenta, print_bold_red, print_error};
+use filefind_common::config::OutputFormat;
+use filefind_common::types::FileEntry;
+use filefind_common::{Database, IndexedVolume, format_number, format_size, print_bold_magenta, print_bold_red, print_error};
 
 use crate::config::CliConfig;
 use crate::hyperlink::Hyperlinker;
@@ -827,9 +827,9 @@ fn search_all_patterns_mixed(config: &CliConfig, database: &Database) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use filefind::Database;
-    use filefind::config::HyperlinkMode;
-    use filefind::types::{FileEntry, IndexedVolume, VolumeType};
+    use filefind_common::Database;
+    use filefind_common::config::HyperlinkMode;
+    use filefind_common::types::{FileEntry, IndexedVolume, VolumeType};
     use tempfile::tempdir;
 
     use super::*;
@@ -906,7 +906,7 @@ mod tests {
             files_only: false,
             directories_only: false,
             files_per_dir: 20,
-            output_format: filefind::config::OutputFormat::Grouped,
+            output_format: filefind_common::config::OutputFormat::Grouped,
             sort_by: SortBy::Name,
             verbose: false,
             database_path: PathBuf::new(),
@@ -1866,10 +1866,10 @@ mod tests {
         assert_eq!(base_results.len(), 1);
 
         for format in [
-            filefind::config::OutputFormat::Grouped,
-            filefind::config::OutputFormat::List,
-            filefind::config::OutputFormat::Name,
-            filefind::config::OutputFormat::Info,
+            filefind_common::config::OutputFormat::Grouped,
+            filefind_common::config::OutputFormat::List,
+            filefind_common::config::OutputFormat::Name,
+            filefind_common::config::OutputFormat::Info,
         ] {
             let config = CliConfig {
                 output_format: format,
@@ -1974,7 +1974,7 @@ mod tests {
         let database = setup_database();
         let config = CliConfig {
             sort_by: SortBy::Name,
-            output_format: filefind::config::OutputFormat::Name,
+            output_format: filefind_common::config::OutputFormat::Name,
             ..search_config(vec![".txt"])
         };
         let mut results = search_any_pattern(&config, &database).expect("Search failed");

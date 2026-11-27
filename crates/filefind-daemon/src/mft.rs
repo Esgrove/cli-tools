@@ -15,7 +15,7 @@ use std::time::SystemTime;
 #[cfg(windows)]
 use anyhow::Context;
 use anyhow::{Result, bail};
-use filefind::types::{FileEntry, IndexedVolume};
+use filefind_common::types::{FileEntry, IndexedVolume};
 #[cfg(windows)]
 use tracing::debug;
 
@@ -34,7 +34,7 @@ use windows::Win32::System::Ioctl::{FSCTL_ENUM_USN_DATA, FSCTL_GET_NTFS_VOLUME_D
 use windows::core::PCWSTR;
 
 #[cfg(windows)]
-use filefind::types::VolumeType;
+use filefind_common::types::VolumeType;
 
 use crate::usn_buffer;
 

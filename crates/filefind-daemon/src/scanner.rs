@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use filefind::types::{IndexedVolume, VolumeType};
-use filefind::{
+use filefind_common::types::{IndexedVolume, VolumeType};
+use filefind_common::{
     Config, Database, FileEntry, PathType, classify_path, extract_drive_letter, format_number,
     get_persistent_drive_mapping, is_network_path, is_unc_path,
 };

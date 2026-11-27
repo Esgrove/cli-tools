@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use colored::Colorize;
-use filefind::FileEntry;
-use filefind::is_network_path;
+use filefind_common::FileEntry;
+use filefind_common::is_network_path;
 
 const CHECK_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -271,7 +271,7 @@ mod tests {
     use std::borrow::Cow;
     use std::fs;
 
-    use filefind::FileEntry;
+    use filefind_common::FileEntry;
     use tempfile::tempdir;
 
     use super::*;
