@@ -202,7 +202,12 @@ impl DotsCli {
         let root = cli_tools_common::resolve_input_path(self.path.as_deref())?;
         let config = crate::config::build_config(&self)?;
 
-        DotRename::new(root, config, path_given).run()
+        let mut dots = DotRename::new(root, config, path_given);
+        let result = dots.run();
+        for warning in filefind_common::update_default_index(&dots.take_path_changes()) {
+            cli_tools_common::print_yellow!("Could not update the filefind index: {warning}");
+        }
+        result
     }
 }
 

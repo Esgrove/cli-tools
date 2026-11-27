@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow};
@@ -18,7 +19,7 @@ use crate::normalize_extension;
 use crate::{DotFormat, DotRenameConfig};
 use cli_tools_common::get_normalized_file_name_and_extension;
 use cli_tools_common::os_str_to_string;
-use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
+use cli_tools_common::{OverwritePolicy, PathChange, RenameOutcome, TargetReservations};
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
@@ -39,6 +40,8 @@ pub struct DotRename {
     root: PathBuf,
     config: DotRenameConfig,
     path_given: bool,
+    /// Renames, moves, and removals done so far, for updating file indexes afterwards.
+    path_changes: Mutex<Vec<PathChange>>,
 }
 
 impl DotRename {
@@ -49,7 +52,18 @@ impl DotRename {
             root,
             config,
             path_given,
+            path_changes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Take the renames, moves, and removals done so far, leaving the list empty.
+    ///
+    /// A dry run does nothing, so it records no changes.
+    #[must_use]
+    pub fn take_path_changes(&self) -> Vec<PathChange> {
+        self.path_changes
+            .lock()
+            .map_or_default(|mut changes| std::mem::take(&mut *changes))
     }
 
     /// Format a file name using the configured formatting rules.
@@ -359,6 +373,7 @@ impl DotRename {
                         println!("Overwriting existing file: {}", target_file.display());
                     }
                     fs::rename(source_file, &target_file)?;
+                    self.record_change(PathChange::moved_file(source_file, &target_file));
                     any_files_moved = true;
                 } else {
                     println!(
@@ -371,6 +386,7 @@ impl DotRename {
                     println!("Moving file: {}", target_file.display());
                 }
                 fs::rename(source_file, &target_file)?;
+                self.record_change(PathChange::moved_file(source_file, &target_file));
                 any_files_moved = true;
             }
         }
@@ -395,6 +411,7 @@ impl DotRename {
                     println!("Removing empty directory: {}", dir_path.display());
                 }
                 fs::remove_dir(dir_path)?;
+                self.record_change(PathChange::removed_directory(dir_path));
             }
         }
 
@@ -404,6 +421,7 @@ impl DotRename {
                 println!("Removing empty source directory: {}", dir.display());
             }
             fs::remove_dir(dir)?;
+            self.record_change(PathChange::removed_directory(dir));
         }
 
         Ok(())
@@ -503,27 +521,52 @@ impl DotRename {
                 continue;
             }
 
-            let policy = if self.config.overwrite {
-                OverwritePolicy::Overwrite
-            } else {
-                OverwritePolicy::Skip
-            };
-            match cli_tools_common::safe_rename(path, new_path, policy) {
-                Ok(RenameOutcome::SkippedExisting) => {
-                    println!(
-                        "{}",
-                        format!("Skipping rename to already existing file: {new_str}").yellow()
-                    );
-                }
-                Ok(_) => {
-                    num_renamed += 1;
-                }
-                Err(e) => {
-                    eprintln!("{}", format!("Error renaming: {old_str}\n{e}").red());
-                }
+            if self.rename_path(path, new_path, &old_str, &new_str) {
+                num_renamed += 1;
             }
         }
         num_renamed
+    }
+
+    /// Rename one path, record the change, and report whether it counts as renamed.
+    ///
+    /// An existing target is replaced only with the overwrite option and skipped otherwise.
+    fn rename_path(&self, path: &Path, new_path: &Path, old_str: &str, new_str: &str) -> bool {
+        let policy = if self.config.overwrite {
+            OverwritePolicy::Overwrite
+        } else {
+            OverwritePolicy::Skip
+        };
+        match cli_tools_common::safe_rename(path, new_path, policy) {
+            Ok(RenameOutcome::SkippedExisting) => {
+                println!(
+                    "{}",
+                    format!("Skipping rename to already existing file: {new_str}").yellow()
+                );
+                false
+            }
+            Ok(outcome) => {
+                if matches!(outcome, RenameOutcome::Renamed | RenameOutcome::CaseRenamed) {
+                    self.record_change(if new_path.is_dir() {
+                        PathChange::moved_directory(path, new_path)
+                    } else {
+                        PathChange::moved_file(path, new_path)
+                    });
+                }
+                true
+            }
+            Err(e) => {
+                eprintln!("{}", format!("Error renaming: {old_str}\n{e}").red());
+                false
+            }
+        }
+    }
+
+    /// Remember a completed change for [`Self::take_path_changes`].
+    fn record_change(&self, change: PathChange) {
+        if let Ok(mut changes) = self.path_changes.lock() {
+            changes.push(change);
+        }
     }
 
     /// Get the full path with formatted filename and extension.
@@ -784,6 +827,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         assert_eq!(dots.format_name("some file name"), "My.Prefix.Some.File.Name");
@@ -799,6 +843,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         assert_eq!(dots.format_name("some file name"), "Some.File.Name.My.Suffix");
@@ -821,6 +866,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -842,6 +888,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -868,6 +915,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -900,6 +948,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -945,6 +994,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -981,6 +1031,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let dots_with_start = DotRename {
@@ -992,6 +1043,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // Without --start, date causes reordering (prefix moves after date)
@@ -1028,6 +1080,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1075,6 +1128,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // Both should be applied (prefix first, then suffix)
@@ -1102,6 +1156,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1148,6 +1203,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1180,6 +1236,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1207,6 +1264,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1234,6 +1292,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1258,6 +1317,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // If filename already contains the prefix, it should not duplicate
@@ -1274,6 +1334,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // If filename already ends with suffix, should not duplicate
@@ -1293,6 +1354,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1316,6 +1378,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // 5+ digit ID at start should keep prefix at start (skip reordering)
@@ -1351,6 +1414,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1384,6 +1448,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1417,6 +1482,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1458,6 +1524,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: false,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         // Full date pattern: year.month.day
@@ -1479,6 +1546,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1503,6 +1571,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_with_recursive_prefix_suffix();
@@ -1532,6 +1601,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1563,6 +1633,7 @@ mod test_prefix_suffix_options {
                 ..Default::default()
             },
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1622,6 +1693,7 @@ mod test_extension_only_rename {
             root,
             config: DotRenameConfig::default(),
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1653,6 +1725,7 @@ mod test_extension_only_rename {
             root,
             config: DotRenameConfig::default(),
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -1679,6 +1752,7 @@ mod test_extension_only_rename {
             root,
             config: DotRenameConfig::default(),
             path_given: true,
+            path_changes: Mutex::new(Vec::new()),
         };
 
         let files = dots.gather_files_to_rename().expect("Failed to gather files");
@@ -2990,5 +3064,110 @@ mod test_remove_empty_directories {
 
         assert_eq!(tree.dirs(), vec!["source", "source/link holder"]);
         assert!(tree.exists("target.txt"));
+    }
+}
+
+#[cfg(test)]
+mod test_path_changes {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn renamed_files_are_reported_as_moves() {
+        let temporary = temporary_directory();
+        let original = write(temporary.path(), "some file name.txt");
+        let mut instance = dots(temporary.path(), DotRenameConfig::default(), false);
+
+        instance.run().expect("the run should succeed");
+
+        assert_eq!(
+            instance.take_path_changes(),
+            vec![PathChange::moved_file(
+                original,
+                temporary.path().join("Some.File.Name.txt")
+            )]
+        );
+        assert_eq!(instance.take_path_changes(), Vec::new(), "taking empties the list");
+    }
+
+    #[test]
+    fn dryrun_reports_no_changes() {
+        let temporary = temporary_directory();
+        write(temporary.path(), "some file name.txt");
+        let mut instance = dots(
+            temporary.path(),
+            DotRenameConfig {
+                dryrun: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        instance.run().expect("the run should succeed");
+
+        assert_eq!(instance.take_path_changes(), Vec::new());
+    }
+
+    #[test]
+    fn renamed_directories_are_reported_as_directory_moves() {
+        let temporary = temporary_directory();
+        let original = directory(temporary.path(), "some_dir");
+        write(&original, "Already.Formatted.txt");
+        let mut instance = dots(
+            temporary.path(),
+            DotRenameConfig {
+                rename_directories: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        instance.run().expect("the run should succeed");
+
+        assert_eq!(
+            instance.take_path_changes(),
+            vec![PathChange::moved_directory(original, temporary.path().join("Some Dir"))]
+        );
+    }
+
+    #[test]
+    fn merged_directories_report_each_moved_file_and_the_removed_source() {
+        let temporary = temporary_directory();
+        let source = directory(temporary.path(), "some_dir");
+        let first = write(&source, "file one.txt");
+        let second = write(&source, "nested/file two.txt");
+        let target = directory(temporary.path(), "Some Dir");
+        let mut instance = dots(
+            temporary.path(),
+            DotRenameConfig {
+                rename_directories: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        instance.run().expect("the run should succeed");
+
+        let changes = instance.take_path_changes();
+        assert!(
+            changes.contains(&PathChange::moved_file(first, target.join("file one.txt"))),
+            "{changes:?}"
+        );
+        assert!(
+            changes.contains(&PathChange::moved_file(
+                second,
+                target.join("nested").join("file two.txt")
+            )),
+            "{changes:?}"
+        );
+        assert!(
+            changes.contains(&PathChange::removed_directory(source.clone())),
+            "{changes:?}"
+        );
+        assert!(
+            changes.contains(&PathChange::removed_directory(source.join("nested"))),
+            "{changes:?}"
+        );
+        assert_eq!(changes.len(), 4, "{changes:?}");
     }
 }

@@ -24,6 +24,7 @@ cli = [
     "cli-tools-common/completion",
     "dep:clap",
     "dep:clap_complete",
+    "dep:filefind-common",
 ]
 
 [dependencies]
@@ -43,9 +44,11 @@ walkdir = { workspace = true }
 
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
+filefind-common = { workspace = true, optional = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }
+filefind-common = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }

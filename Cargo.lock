@@ -590,6 +590,7 @@ dependencies = [
  "cli-tools-common",
  "colored",
  "criterion",
+ "filefind-common",
  "indicatif",
  "itertools 0.15.0",
  "proptest",
