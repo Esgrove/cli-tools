@@ -27,11 +27,5 @@ indicatif = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
 [lints]
 workspace = true

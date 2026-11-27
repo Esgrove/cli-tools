@@ -584,24 +584,23 @@ fn nearest_existing_directory(path: &Path) -> PathBuf {
     current
 }
 
-/// Get the available disk space in bytes for the volume containing the given path.
+/// Get the available disk space in bytes at `path`, returning an error when the probe fails.
 ///
-/// When `path` is a file or does not exist yet,
-/// the space is measured for the volume of the nearest existing ancestor directory.
-/// Returns `None` if the available space could not be determined.
+/// On Windows, uses `GetDiskFreeSpaceExW`.
+/// On Apple platforms, uses the 64-bit `statfs` interface so volumes above 16 TiB do not truncate.
+/// On other Unix platforms, uses `statvfs` with `f_bavail * f_frsize`.
+///
+/// # Errors
+/// Returns an error if `path` cannot be encoded for the OS or the system call fails.
 #[cfg(windows)]
-#[must_use]
-pub fn available_disk_space(path: &Path) -> Option<u64> {
+pub fn try_available_disk_space(path: &Path) -> Result<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    let directory = nearest_existing_directory(path);
-    let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
-    // null terminator
-    wide.push(0);
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
     let mut free_bytes_available: u64 = 0;
-    // SAFETY: GetDiskFreeSpaceExW reads the null-terminated directory path
+    // SAFETY: GetDiskFreeSpaceExW reads the null-terminated path
     // and writes the number of free bytes available to the caller into the out-parameter.
     // The remaining out-parameters are null, which the API explicitly allows.
     #[allow(unsafe_code)]
@@ -614,7 +613,94 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
         )
     };
 
-    (result != 0).then_some(free_bytes_available)
+    if result == 0 {
+        anyhow::bail!(
+            "Failed to get disk space for {}. Error code: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    Ok(free_bytes_available)
+}
+
+/// Get the available disk space in bytes at `path` using Apple's 64-bit `statfs`.
+///
+/// Apple's `statvfs` narrows block counts to 32-bit `fsblkcnt_t` fields,
+/// which truncates free space on volumes with more than 16 TiB available.
+/// Returns the space available to unprivileged processes (`f_bavail`, not `f_bfree`).
+///
+/// # Errors
+/// Returns an error if `path` contains an interior NUL byte or `statfs` fails.
+#[cfg(target_vendor = "apple")]
+pub fn try_available_disk_space(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_cstr = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("Path contains an interior NUL byte: {}", path.display()))?;
+    // SAFETY: creating a zeroed `statfs` struct is valid because every field is plain data.
+    #[allow(unsafe_code)]
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+
+    // SAFETY: `path_cstr` is a valid NUL-terminated path and `stats` points to writable storage.
+    #[allow(unsafe_code)]
+    let call_result = unsafe { libc::statfs(path_cstr.as_ptr(), &raw mut stats) };
+    if call_result != 0 {
+        anyhow::bail!(
+            "Failed to get disk space for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    Ok(stats.f_bavail.saturating_mul(u64::from(stats.f_bsize)))
+}
+
+/// Get the available disk space in bytes at `path` using `statvfs`.
+///
+/// Returns the space available to unprivileged processes (`f_bavail`, not `f_bfree`).
+///
+/// # Errors
+/// Returns an error if `path` contains an interior NUL byte or `statvfs` fails.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+pub fn try_available_disk_space(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_cstr = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("Path contains an interior NUL byte: {}", path.display()))?;
+    // SAFETY: creating a zeroed `statvfs` struct is valid because every field is plain data.
+    #[allow(unsafe_code)]
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+
+    // SAFETY: `path_cstr` is a valid NUL-terminated path and `stats` points to writable storage.
+    #[allow(unsafe_code)]
+    let call_result = unsafe { libc::statvfs(path_cstr.as_ptr(), &raw mut stats) };
+    if call_result != 0 {
+        anyhow::bail!(
+            "Failed to get disk space for {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    // Field widths differ across Unix targets (u32 vs u64), so widen both explicitly.
+    #[allow(clippy::useless_conversion)]
+    let available = u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize));
+    Ok(available)
+}
+
+/// Get the available disk space in bytes at `path` on unsupported platforms.
+///
+/// # Errors
+/// Always returns an error on platforms that are neither Unix nor Windows.
+#[cfg(not(any(unix, windows)))]
+pub fn try_available_disk_space(path: &Path) -> Result<u64> {
+    anyhow::bail!(
+        "Disk space queries are not supported on this platform: {}",
+        path.display()
+    )
 }
 
 /// Get the available disk space in bytes for the volume containing the given path.
@@ -622,40 +708,10 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
 /// When `path` is a file or does not exist yet,
 /// the space is measured for the volume of the nearest existing ancestor directory.
 /// Returns `None` if the available space could not be determined.
-#[cfg(unix)]
 #[must_use]
 pub fn available_disk_space(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
     let directory = nearest_existing_directory(path);
-    let path_cstr = CString::new(directory.as_os_str().as_bytes()).ok()?;
-    let mut volume_info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-
-    // SAFETY: `path_cstr` is a valid null-terminated path and `volume_info` points to writable `statvfs` storage.
-    #[allow(unsafe_code)]
-    let call_result = unsafe { libc::statvfs(path_cstr.as_ptr(), volume_info.as_mut_ptr()) };
-    if call_result != 0 {
-        return None;
-    }
-
-    // SAFETY: `statvfs` returned 0, so `volume_info` has been initialized by the operating system.
-    #[allow(unsafe_code)]
-    let volume_info = unsafe { volume_info.assume_init() };
-    // Field widths differ across Unix targets (u32 vs u64), so widen explicitly.
-    #[allow(clippy::useless_conversion)]
-    let block_size = u64::from(volume_info.f_frsize).max(u64::from(volume_info.f_bsize));
-    #[allow(clippy::useless_conversion)]
-    u64::from(volume_info.f_bavail).checked_mul(block_size)
-}
-
-/// Get the available disk space in bytes for the volume containing the given path.
-///
-/// Returns `None` on platforms that are neither Unix nor Windows.
-#[cfg(not(any(unix, windows)))]
-#[must_use]
-pub const fn available_disk_space(_path: &Path) -> Option<u64> {
-    None
+    try_available_disk_space(&directory).ok()
 }
 
 /// Check if entry should be skipped (hidden or system directory).
@@ -2728,5 +2784,23 @@ mod test_core_bugfixes {
             Some(Path::new("/tmp/target/tmp")),
             Some(unit_test_exe),
         ));
+    }
+}
+
+#[cfg(test)]
+mod test_try_available_disk_space {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn probes_existing_directory_and_fails_on_missing_path() {
+        let temp = tempdir().unwrap();
+        let bytes = try_available_disk_space(temp.path()).unwrap();
+        assert!(bytes > 0);
+
+        let missing = temp.path().join("does-not-exist").join("nested");
+        assert!(try_available_disk_space(&missing).is_err());
+        assert!(available_disk_space(&missing).is_some_and(|space| space > 0));
     }
 }

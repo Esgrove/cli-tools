@@ -11,12 +11,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
 #[cfg(not(windows))]
 use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,10 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-#[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-use cli_tools_common::{format_size, print_error, print_green, print_yellow};
+use cli_tools_common::{format_size, print_error, print_green, print_yellow, try_available_disk_space};
 use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 use filefind_common::database::Database;
 #[cfg(windows)]
@@ -601,7 +595,7 @@ fn prompt_confirmation() -> Result<bool> {
 /// # Errors
 /// Returns an error if the space cannot be determined or is insufficient.
 fn check_disk_space(destination: &Path, required_bytes: u64) -> Result<()> {
-    let available = get_available_space(destination)?;
+    let available = try_available_disk_space(destination)?;
 
     if available < required_bytes {
         bail!(
@@ -613,111 +607,6 @@ fn check_disk_space(destination: &Path, required_bytes: u64) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Get available disk space at the given path.
-///
-/// On Windows, uses `GetDiskFreeSpaceExW`. On Apple platforms, uses `statfs`.
-/// On other Unix platforms, uses `statvfs`.
-#[cfg(windows)]
-fn get_available_space(path: &Path) -> Result<u64> {
-    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-
-    let mut free_bytes_available: u64 = 0;
-    let mut total_bytes: u64 = 0;
-    let mut total_free_bytes: u64 = 0;
-
-    // SAFETY: `GetDiskFreeSpaceExW` is a safe Windows API call
-    // that writes disk space information to the provided output pointers.
-    #[allow(unsafe_code)]
-    let result = unsafe {
-        GetDiskFreeSpaceExW(
-            wide_path.as_ptr(),
-            &raw mut free_bytes_available,
-            &raw mut total_bytes,
-            &raw mut total_free_bytes,
-        )
-    };
-
-    if result == 0 {
-        bail!(
-            "Failed to get disk space for {}. Error code: {}",
-            path.display(),
-            io::Error::last_os_error()
-        );
-    }
-
-    Ok(free_bytes_available)
-}
-
-/// Get available disk space at the given path using `statfs`.
-///
-/// Apple's `statvfs` narrows block counts to 32-bit `fsblkcnt_t` fields,
-/// which truncates free space on volumes with more than 16 TiB available,
-/// so the 64-bit `statfs` interface is used instead.
-/// Returns the space available to unprivileged processes (`f_bavail`, not `f_bfree`),
-/// matching what a file move can actually use.
-#[cfg(target_vendor = "apple")]
-fn get_available_space(path: &Path) -> Result<u64> {
-    let path_bytes = path_to_cstring(path)?;
-
-    // SAFETY: creating a zeroed statfs struct is valid. Every field is plain data.
-    #[allow(unsafe_code)]
-    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
-
-    // SAFETY: `statfs` writes filesystem statistics to the output struct.
-    // `path_bytes` is a valid NUL-terminated C string.
-    #[allow(unsafe_code)]
-    let result = unsafe { libc::statfs(path_bytes.as_ptr(), &raw mut stats) };
-
-    if result != 0 {
-        bail!(
-            "Failed to get disk space for {}: {}",
-            path.display(),
-            io::Error::last_os_error()
-        );
-    }
-
-    Ok(stats.f_bavail.saturating_mul(u64::from(stats.f_bsize)))
-}
-
-/// Get available disk space at the given path using `statvfs`.
-///
-/// Returns the space available to unprivileged processes
-/// (`f_bavail`, not `f_bfree`), matching what a file move can actually use.
-#[cfg(all(unix, not(target_vendor = "apple")))]
-fn get_available_space(path: &Path) -> Result<u64> {
-    let path_bytes = path_to_cstring(path)?;
-
-    // SAFETY: creating a zeroed statvfs struct is valid. Every field is plain data.
-    #[allow(unsafe_code)]
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-
-    // SAFETY: `statvfs` writes filesystem statistics to the output struct.
-    // `path_bytes` is a valid NUL-terminated C string.
-    #[allow(unsafe_code)]
-    let result = unsafe { libc::statvfs(path_bytes.as_ptr(), &raw mut stats) };
-
-    if result != 0 {
-        bail!(
-            "Failed to get disk space for {}: {}",
-            path.display(),
-            io::Error::last_os_error()
-        );
-    }
-
-    // Field widths differ across Unix platforms, so widen both to u64.
-    // The conversion is a no-op on platforms where the fields are already u64.
-    #[allow(clippy::useless_conversion)]
-    let available = u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize));
-    Ok(available)
-}
-
-/// Convert a path to a NUL-terminated C string for FFI calls.
-#[cfg(unix)]
-fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
-    std::ffi::CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("Path contains an interior NUL byte: {}", path.display()))
 }
 
 /// Execute the file moves with progress reporting and abort handling.
@@ -2124,7 +2013,7 @@ mod tests {
     #[test]
     fn test_get_available_space_temp_dir() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let available = get_available_space(temp_dir.path()).expect("failed to get available space");
+        let available = try_available_disk_space(temp_dir.path()).expect("failed to get available space");
         // Any real filesystem should report some available space
         assert!(available > 0, "Available space should be greater than 0");
     }
@@ -2133,7 +2022,7 @@ mod tests {
     fn test_get_available_space_root_drive() {
         // The current directory's drive root should always be accessible
         let current_dir = std::env::current_dir().expect("failed to get current dir");
-        let available = get_available_space(&current_dir).expect("failed to get available space");
+        let available = try_available_disk_space(&current_dir).expect("failed to get available space");
         assert!(
             available > 0,
             "Available space on current drive should be greater than 0"
@@ -2177,7 +2066,7 @@ mod tests {
     #[test]
     fn test_check_disk_space_exactly_available() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let available = get_available_space(temp_dir.path()).expect("failed to get available space");
+        let available = try_available_disk_space(temp_dir.path()).expect("failed to get available space");
         // Free space can change between the two calls, so stay just below the observed value
         // while still exercising the near-boundary success case.
         let required = available.saturating_sub(4096);
@@ -2191,7 +2080,7 @@ mod tests {
     #[test]
     fn test_check_disk_space_one_over_available() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let available = get_available_space(temp_dir.path()).expect("failed to get available space");
+        let available = try_available_disk_space(temp_dir.path()).expect("failed to get available space");
         // Requesting one byte more than available should fail
         let result = check_disk_space(temp_dir.path(), available + 1);
         assert!(result.is_err(), "Requesting one byte more than available should fail");
