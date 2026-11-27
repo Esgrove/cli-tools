@@ -251,6 +251,21 @@ pub fn collapse_repeated_separators(text: &str) -> String {
     collapsed.trim_matches(trim).to_string()
 }
 
+/// Format a number with comma thousands separators, for example 1234567 as "1,234,567".
+#[must_use]
+pub fn format_number(number: u64) -> String {
+    let digits = number.to_string();
+    let length = digits.len();
+    let mut formatted = String::with_capacity(length + length.saturating_sub(1) / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (length - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
 /// Format bytes as human-readable size.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
@@ -1016,6 +1031,32 @@ macro_rules! print_cyan {
     };
 }
 
+/// Print a message in bold yellow to stdout.
+#[inline]
+pub fn print_yellow_bold(message: &str) {
+    println!("{}", message.yellow().bold());
+}
+
+#[macro_export]
+macro_rules! print_yellow_bold {
+    ($($arg:tt)*) => {
+        $crate::print_yellow_bold(&format!($($arg)*))
+    };
+}
+
+/// Print a message in bold red to stdout.
+#[inline]
+pub fn print_red_bold(message: &str) {
+    println!("{}", message.red().bold());
+}
+
+#[macro_export]
+macro_rules! print_red_bold {
+    ($($arg:tt)*) => {
+        $crate::print_red_bold(&format!($($arg)*))
+    };
+}
+
 /// Print a message in bold to stdout.
 #[inline]
 pub fn print_bold(message: &str) {
@@ -1675,6 +1716,31 @@ mod format_size_tests {
     fn terabytes() {
         assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.00 TB");
         assert_eq!(format_size(2 * 1024 * 1024 * 1024 * 1024), "2.00 TB");
+    }
+}
+
+#[cfg(test)]
+mod format_number_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_numbers_below_one_thousand() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(7), "7");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn separates_thousands() {
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(12_345), "12,345");
+        assert_eq!(format_number(123_456), "123,456");
+        assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn formats_the_largest_value() {
+        assert_eq!(format_number(u64::MAX), "18,446,744,073,709,551,615");
     }
 }
 
