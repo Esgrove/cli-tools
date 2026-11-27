@@ -2644,7 +2644,12 @@ mod test_nested_trees {
             "extensionless file must not gain a trailing dot: {:?}",
             tree.snapshot()
         );
-        assert!(!tree.exists("My.Readme."));
+        // Windows strips trailing dots when resolving a path, so check the listed names instead of `exists`.
+        assert!(
+            !tree.files().iter().any(|name| name.ends_with('.')),
+            "{:?}",
+            tree.files()
+        );
     }
 
     #[test]
@@ -2737,20 +2742,22 @@ mod test_nested_trees {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod test_symlinks {
     use super::*;
     use cli_tools_common::test_support::TempTree;
 
     /// Tree with a walk root and a directory outside it that the root links to.
-    fn linked_tree() -> TempTree {
+    ///
+    /// Returns `None` when the process may not create symlinks.
+    fn linked_tree() -> Option<TempTree> {
         let tree = TempTree::new();
         tree.file_with("outside/real dir/inner file.txt", "inner");
         tree.file_with("outside/real file.txt", "real");
         tree.file("root/sub dir/plain file.txt");
-        tree.symlink("outside/real dir", "root/sub dir/linked dir");
-        tree.symlink("outside/real file.txt", "root/sub dir/linked file.txt");
-        tree
+        tree.try_symlink("outside/real dir", "root/sub dir/linked dir")?;
+        tree.try_symlink("outside/real file.txt", "root/sub dir/linked file.txt")?;
+        Some(tree)
     }
 
     /// Run dots on the "root" directory of the tree.
@@ -2762,7 +2769,9 @@ mod test_symlinks {
 
     #[test]
     fn link_targets_outside_the_root_are_never_renamed() {
-        let tree = linked_tree();
+        let Some(tree) = linked_tree() else {
+            return;
+        };
 
         run(
             &tree,
@@ -2786,7 +2795,9 @@ mod test_symlinks {
 
     #[test]
     fn directories_behind_a_link_are_not_walked() {
-        let tree = linked_tree();
+        let Some(tree) = linked_tree() else {
+            return;
+        };
 
         run(
             &tree,
@@ -2806,7 +2817,9 @@ mod test_symlinks {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("root/Some Dir/existing.txt", "existing");
-        tree.symlink("outside/real", "root/some_dir");
+        if tree.try_symlink("outside/real", "root/some_dir").is_none() {
+            return;
+        }
 
         run(
             &tree,
@@ -2826,7 +2839,9 @@ mod test_symlinks {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("root/Some Dir/existing.txt", "existing");
-        tree.symlink("outside/real", "root/some_dir");
+        if tree.try_symlink("outside/real", "root/some_dir").is_none() {
+            return;
+        }
 
         run(
             &tree,
@@ -2846,7 +2861,9 @@ mod test_symlinks {
         let tree = TempTree::new();
         tree.dir("outside/real");
         tree.file_with("root/some_dir/a.txt", "local");
-        tree.symlink("outside/real", "root/Some Dir");
+        if tree.try_symlink("outside/real", "root/Some Dir").is_none() {
+            return;
+        }
 
         run(
             &tree,
@@ -2869,7 +2886,9 @@ mod test_symlinks {
         let tree = TempTree::new();
         tree.file_with("outside/real/deep/track.txt", "original");
         tree.file_with("root/some_dir/languages/deep/track.txt", "local");
-        tree.symlink("outside/real", "root/Some Dir/languages");
+        if tree.try_symlink("outside/real", "root/Some Dir/languages").is_none() {
+            return;
+        }
         let before = tree.snapshot();
 
         run(
@@ -2889,7 +2908,12 @@ mod test_symlinks {
         let tree = TempTree::new();
         tree.file_with("root/some_dir/item.txt", "new");
         tree.dir("root/Some Dir");
-        tree.symlink("outside/missing.txt", "root/Some Dir/item.txt");
+        if tree
+            .try_symlink("outside/missing.txt", "root/Some Dir/item.txt")
+            .is_none()
+        {
+            return;
+        }
 
         run(
             &tree,
@@ -2951,13 +2975,14 @@ mod test_remove_empty_directories {
         assert_eq!(tree.dirs(), vec!["other"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_directory_holding_only_a_symlink_is_kept() {
         let tree = TempTree::new();
         tree.file("target.txt");
         tree.dir("source/empty/");
-        tree.symlink("target.txt", "source/link holder/link");
+        if tree.try_symlink("target.txt", "source/link holder/link").is_none() {
+            return;
+        }
 
         DotRename::default()
             .remove_empty_directories(&tree.join("source"))
