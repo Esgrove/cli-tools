@@ -33,6 +33,21 @@ impl CompletionArgs {
 
 /// Generate a shell completion script for the given shell.
 ///
+/// When `install` is true, the completion file is written to the shell specific completion directory.
+/// Otherwise the completion script is printed to stdout.
+///
+/// # Examples
+///
+/// ```no_run
+/// use clap::Command;
+/// use clap_complete::Shell;
+/// use cli_tools_common::generate_shell_completion;
+///
+/// let command = Command::new("myapp").about("example app");
+/// // Print the Bash completion script to stdout
+/// generate_shell_completion(Shell::Bash, command, false, false, "myapp").expect("generation failed");
+/// ```
+///
 /// # Errors
 /// Returns an error if:
 /// - The shell completion directory cannot be determined or created

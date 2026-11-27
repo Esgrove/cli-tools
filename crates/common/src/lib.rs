@@ -277,6 +277,18 @@ pub fn format_number(number: u64) -> String {
 }
 
 /// Format bytes as human-readable size.
+///
+/// # Examples
+///
+/// ```
+/// use cli_tools_common::format_size;
+///
+/// assert_eq!(format_size(0), "0 B");
+/// assert_eq!(format_size(512), "512 B");
+/// assert_eq!(format_size(1024), "1.00 KB");
+/// assert_eq!(format_size(1_048_576), "1.00 MB");
+/// assert_eq!(format_size(1_073_741_824), "1.00 GB");
+/// ```
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
     if bytes >= TB {
@@ -964,6 +976,12 @@ pub fn format_timestamp(timestamp: i64) -> String {
 }
 
 /// Print an error message prefixed with "Error: " in red to stderr.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_error("something went wrong");
+/// ```
 #[inline]
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("Error: {message}").red());
@@ -977,6 +995,12 @@ macro_rules! print_error {
 }
 
 /// Print a message in yellow to stderr.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_yellow("this might be a problem");
+/// ```
 #[inline]
 pub fn print_yellow(message: &str) {
     eprintln!("{}", message.yellow());
@@ -990,6 +1014,12 @@ macro_rules! print_yellow {
 }
 
 /// Print a message in green to stdout.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_green("operation completed");
+/// ```
 #[inline]
 pub fn print_green(message: &str) {
     println!("{}", message.green());
@@ -1016,6 +1046,12 @@ macro_rules! print_magenta {
 }
 
 /// Print a message in bold magenta to stdout.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_magenta_bold("highlighted info");
+/// ```
 #[inline]
 pub fn print_magenta_bold(message: &str) {
     println!("{}", message.magenta().bold());
@@ -1029,6 +1065,12 @@ macro_rules! print_magenta_bold {
 }
 
 /// Print a message in cyan to stdout.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_cyan("indexing files...");
+/// ```
 #[inline]
 pub fn print_cyan(message: &str) {
     println!("{}", message.cyan());
@@ -1042,6 +1084,12 @@ macro_rules! print_cyan {
 }
 
 /// Print a message in bold yellow to stdout.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_yellow_bold("important notice");
+/// ```
 #[inline]
 pub fn print_yellow_bold(message: &str) {
     println!("{}", message.yellow().bold());
@@ -1055,6 +1103,12 @@ macro_rules! print_yellow_bold {
 }
 
 /// Print a message in bold red to stdout.
+///
+/// # Examples
+///
+/// ```
+/// cli_tools_common::print_red_bold("critical error");
+/// ```
 #[inline]
 pub fn print_red_bold(message: &str) {
     println!("{}", message.red().bold());
