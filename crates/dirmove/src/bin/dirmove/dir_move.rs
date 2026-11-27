@@ -6,14 +6,15 @@
 //! and creating directories for file groups.
 //! The library components decide what to do, and this module prints the offers, prompts, and moves.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
 use cli_tools_common::{
-    TargetReservations, count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error,
-    print_yellow,
+    PathChange, TargetReservations, count_label, format_text_with_highlight, path_to_filename_string, print_bold,
+    print_error, print_yellow,
 };
 use cli_tools_db::locks::ActiveLockStore;
 use cli_tools_dirmove::{
@@ -51,6 +52,8 @@ pub struct DirMove {
     config: Config,
     /// Directory name database, missing when it could not be opened.
     database: Option<Database>,
+    /// Moves and removals done so far, applied to the filefind index when the run ends.
+    path_changes: RefCell<Vec<PathChange>>,
 }
 
 impl DirectoryMatchOutcome {
@@ -103,6 +106,7 @@ impl DirMove {
             roots,
             config,
             database,
+            path_changes: RefCell::new(Vec::new()),
         }
     }
 
@@ -112,6 +116,13 @@ impl DirMove {
     /// before normal file-to-directory matching.
     /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&mut self) -> anyhow::Result<()> {
+        let result = self.run_passes();
+        self.update_filefind_index();
+        result
+    }
+
+    /// Run every pass, stopping at the first failing one.
+    fn run_passes(&mut self) -> anyhow::Result<()> {
         // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
         self.unpack_directories()?;
         self.merge_prefixed_directories()?;
@@ -141,9 +152,28 @@ impl DirMove {
         PrefixGrouper::new(&self.config.grouping, &self.config.name_filter)
     }
 
-    /// Return the reporter that prints file moves and directory merges.
+    /// Return the reporter that prints file moves and directory merges and records the completed ones.
     fn reporter(&self) -> report::ConsoleReporter<'_> {
-        report::ConsoleReporter::new(&self.roots, self.config.dryrun, self.config.verbose, HIDE_PROGRESS)
+        report::ConsoleReporter::new(
+            &self.roots,
+            self.config.dryrun,
+            self.config.verbose,
+            HIDE_PROGRESS,
+            &self.path_changes,
+        )
+    }
+
+    /// Apply the moves and removals of this run to the user's filefind index.
+    ///
+    /// Tests run in process, where the user's real index must not be touched, so they skip it.
+    fn update_filefind_index(&self) {
+        let changes = self.path_changes.take();
+        if cfg!(test) {
+            return;
+        }
+        for warning in filefind_common::update_default_index(&changes) {
+            print_yellow!("Could not update the filefind index: {warning}");
+        }
     }
 
     /// Delete unwanted directories and unpack configured directory names across every input root.
@@ -828,6 +858,7 @@ mod test_helpers {
             roots: Roots::new(input_roots, output_roots),
             config,
             database: None,
+            path_changes: RefCell::new(Vec::new()),
         }
     }
 

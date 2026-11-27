@@ -5,6 +5,7 @@
 //! The functions format unpack summaries, whole directory merge offer titles,
 //! and the debug listings of match groups and grouping names.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -13,8 +14,8 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use cli_tools_common::{
-    count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_error,
-    print_magenta, print_yellow,
+    PathChange, count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative,
+    print_error, print_magenta, print_yellow,
 };
 use cli_tools_dirmove::{
     DirectoryInfo, DirectoryScan, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver,
@@ -33,6 +34,8 @@ pub struct ConsoleReporter<'a> {
     hide_progress: bool,
     /// Progress bar of the current batch of file moves.
     progress_bar: ProgressBar,
+    /// Completed moves and removals, collected for updating file indexes.
+    changes: &'a RefCell<Vec<PathChange>>,
 }
 
 /// Shows grouping progress with one progress bar reused for every stage.
@@ -42,14 +45,28 @@ pub struct GroupingProgressBar {
 }
 
 impl<'a> ConsoleReporter<'a> {
-    /// Create a reporter, optionally hiding the progress bar.
-    pub fn new(roots: &'a Roots, dryrun: bool, verbose: bool, hide_progress: bool) -> Self {
+    /// Create a reporter, optionally hiding the progress bar, that collects completed changes into `changes`.
+    pub fn new(
+        roots: &'a Roots,
+        dryrun: bool,
+        verbose: bool,
+        hide_progress: bool,
+        changes: &'a RefCell<Vec<PathChange>>,
+    ) -> Self {
         Self {
             roots,
             dryrun,
             verbose,
             hide_progress,
             progress_bar: ProgressBar::hidden(),
+            changes,
+        }
+    }
+
+    /// Remember a completed change, which only real runs report.
+    fn record(&self, change: PathChange) {
+        if !self.dryrun {
+            self.changes.borrow_mut().push(change);
         }
     }
 
@@ -61,6 +78,12 @@ impl<'a> ConsoleReporter<'a> {
 
 impl MoveObserver for ConsoleReporter<'_> {
     fn on_event(&mut self, event: MoveEvent<'_>) {
+        if let MoveEvent::Moved {
+            source, destination, ..
+        } = event
+        {
+            self.record(PathChange::moved_file(source, destination));
+        }
         match event {
             MoveEvent::CreatedDirectory(path) => println!("  Created directory: {}", path_to_filename_string(path)),
             MoveEvent::Started { total_bytes } => {
@@ -122,6 +145,13 @@ impl MoveObserver for ConsoleReporter<'_> {
 
 impl MergeObserver for ConsoleReporter<'_> {
     fn on_merge_event(&mut self, event: MergeEvent<'_>) {
+        match event {
+            MergeEvent::DirectoryMoved { source, target } => {
+                self.record(PathChange::moved_directory(source, target));
+            }
+            MergeEvent::SourceRemoved(source) => self.record(PathChange::removed_directory(source)),
+            _ => {}
+        }
         let verbose = self.verbose;
         match event {
             MergeEvent::Started { source, target } => {
@@ -177,6 +207,21 @@ impl MergeObserver for ConsoleReporter<'_> {
 
 impl UnpackObserver for ConsoleReporter<'_> {
     fn on_unpack_event(&mut self, event: UnpackEvent<'_>) {
+        match event {
+            UnpackEvent::Moved {
+                source,
+                target,
+                is_directory,
+            } => self.record(if is_directory {
+                PathChange::moved_directory(source, target)
+            } else {
+                PathChange::moved_file(source, target)
+            }),
+            UnpackEvent::UnwantedDeleted(directory) | UnpackEvent::Pruned(directory) => {
+                self.record(PathChange::removed_directory(directory));
+            }
+            _ => {}
+        }
         match event {
             UnpackEvent::UnwantedDeleted(directory) => {
                 let label = if self.dryrun {
@@ -540,5 +585,92 @@ mod test_directory_merge_confirmation_prompt {
             directory_merge_confirmation_prompt(2),
             "Merge directories to this directory?"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_recorded_changes {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn roots() -> Roots {
+        Roots::new(vec![PathBuf::from("input")], vec![PathBuf::from("output")])
+    }
+
+    #[test]
+    fn completed_moves_and_removals_are_recorded() {
+        let roots = roots();
+        let changes = RefCell::new(Vec::new());
+        let mut reporter = ConsoleReporter::new(&roots, false, false, true, &changes);
+
+        reporter.on_event(MoveEvent::Moved {
+            name: "a.mkv",
+            source: Path::new("input/a.mkv"),
+            destination: Path::new("output/Show/a.mkv"),
+        });
+        reporter.on_merge_event(MergeEvent::DirectoryMoved {
+            source: Path::new("output/The Show/Season 1"),
+            target: Path::new("output/Show/Season 1"),
+        });
+        reporter.on_merge_event(MergeEvent::SourceRemoved(Path::new("output/The Show")));
+        reporter.on_unpack_event(UnpackEvent::Moved {
+            source: Path::new("input/Movie/subs/english.srt"),
+            target: Path::new("input/Movie/english.srt"),
+            is_directory: false,
+        });
+        reporter.on_unpack_event(UnpackEvent::Moved {
+            source: Path::new("input/Movie/subs/forced"),
+            target: Path::new("input/Movie/forced"),
+            is_directory: true,
+        });
+        reporter.on_unpack_event(UnpackEvent::UnwantedDeleted(Path::new("input/.unwanted")));
+        reporter.on_unpack_event(UnpackEvent::Pruned(Path::new("input/Movie/subs")));
+
+        assert_eq!(
+            changes.take(),
+            vec![
+                PathChange::moved_file("input/a.mkv", "output/Show/a.mkv"),
+                PathChange::moved_directory("output/The Show/Season 1", "output/Show/Season 1"),
+                PathChange::removed_directory("output/The Show"),
+                PathChange::moved_file("input/Movie/subs/english.srt", "input/Movie/english.srt"),
+                PathChange::moved_directory("input/Movie/subs/forced", "input/Movie/forced"),
+                PathChange::removed_directory("input/.unwanted"),
+                PathChange::removed_directory("input/Movie/subs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dry_runs_record_nothing() {
+        let roots = roots();
+        let changes = RefCell::new(Vec::new());
+        let mut reporter = ConsoleReporter::new(&roots, true, false, true, &changes);
+
+        reporter.on_unpack_event(UnpackEvent::UnwantedDeleted(Path::new("input/.unwanted")));
+        reporter.on_merge_event(MergeEvent::WouldRemoveSource(Path::new("output/The Show")));
+
+        assert_eq!(changes.take(), Vec::new());
+    }
+
+    #[test]
+    fn skips_and_failures_are_not_recorded() {
+        let roots = roots();
+        let changes = RefCell::new(Vec::new());
+        let mut reporter = ConsoleReporter::new(&roots, false, false, true, &changes);
+        let error = anyhow::anyhow!("refused");
+
+        reporter.on_event(MoveEvent::SkippedExisting(Path::new("input/a.mkv")));
+        reporter.on_event(MoveEvent::Failed {
+            source: Path::new("input/b.mkv"),
+            error: &error,
+        });
+        reporter.on_unpack_event(UnpackEvent::SkippedExistingFile(Path::new("input/Movie/english.srt")));
+        reporter.on_unpack_event(UnpackEvent::MoveFailed {
+            source: Path::new("input/Movie/subs/x.srt"),
+            error: &error,
+        });
+
+        assert_eq!(changes.take(), Vec::new());
     }
 }

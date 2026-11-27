@@ -4,11 +4,13 @@
 //! The binary runs with `HOME` pointing at an empty directory and without `CARGO_MANIFEST_DIR`,
 //! so it reads no user config and keeps its name database inside that directory.
 //! The auto flag answers every prompt, so no test waits for input.
+//! The filefind index variables point into the home directory, so no run touches the user's index.
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use cli_tools_common::test_support::TempTree;
+use filefind_common::test_support::IndexFixture;
 
 /// Run the binary with the given arguments and an empty home directory.
 fn run_dirmove(home: &Path, arguments: &[&str], root: &Path) -> Output {
@@ -29,6 +31,8 @@ fn dirmove_command(home: &Path) -> Command {
         .env("HOME", home)
         // Windows resolves the data directory from the known folder API and ignores HOME.
         .env("CLI_TOOLS_DB", home.join(".local/share/cli-tools/cli-tools.db"))
+        .env("FILEFIND_DB", home.join("filefind.db"))
+        .env("FILEFIND_CONFIG", home.join("filefind.toml"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null());
     command
@@ -369,4 +373,42 @@ fn files_only_leaves_matching_input_directories_in_place() {
     assert_success(&without_files_only);
     assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E01.mkv"), "nested");
     assert!(!tree.exists("Inbox/Show Alpha"));
+}
+
+#[test]
+fn moves_and_unpacks_move_the_entries_of_an_existing_filefind_index() {
+    let tree = library_tree();
+    let home = TempTree::new();
+    let indexed = [
+        "Library/Show Alpha",
+        "Library/Show Alpha/Show.Alpha.S01E00.mkv",
+        "Library/Show.Alpha.S01E01.mkv",
+        "Library/Show.Alpha.S01E02.mkv",
+        "Library/Movie Night",
+        "Library/Movie Night/subs",
+        "Library/Movie Night/subs/english.srt",
+        "Library/Movie Night/subs/forced",
+        "Library/Movie Night/subs/forced/forced.srt",
+        "Library/Unrelated.File.mkv",
+    ]
+    .map(|relative| tree.join(relative));
+    let index = IndexFixture::create(&home.join("filefind.db"), tree.path(), &indexed);
+
+    let output = run_dirmove(home.path(), &ARGUMENTS, &tree.join("Library"));
+
+    assert_success(&output);
+    assert_eq!(
+        index.indexed_paths(),
+        vec![
+            "Library/Movie Night",
+            "Library/Movie Night/english.srt",
+            "Library/Movie Night/forced",
+            "Library/Movie Night/forced/forced.srt",
+            "Library/Show Alpha",
+            "Library/Show Alpha/Show.Alpha.S01E00.mkv",
+            "Library/Show Alpha/Show.Alpha.S01E01.mkv",
+            "Library/Show Alpha/Show.Alpha.S01E02.mkv",
+            "Library/Unrelated.File.mkv",
+        ]
+    );
 }
