@@ -137,7 +137,7 @@ pub fn find_member_manifests(root: &Path) -> Result<Vec<PathBuf>> {
 /// Find the nearest independent project roots beneath this project.
 /// A scope boundary has a manifest of its own but is not a Cargo member.
 pub(super) fn find_nested_projects(root: &Path, members: &[PathBuf]) -> Vec<PathBuf> {
-    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut nested = Vec::new();
     let mut entries = WalkDir::new(&canonical_root).into_iter();
     while let Some(entry) = entries.next() {
@@ -231,7 +231,7 @@ mod test_find_projects {
 
     fn canonical_temp_dir() -> (TempDir, PathBuf) {
         let temp = TempDir::new().expect("temp dir");
-        let root = temp.path().canonicalize().expect("canonical temp dir");
+        let root = dunce::canonicalize(temp.path()).expect("canonical temp dir");
         (temp, root)
     }
 
@@ -332,7 +332,7 @@ mod test_find_projects {
     #[test]
     fn cargo_membership_keeps_excluded_packages_separate() {
         let tree = cli_tools_common::test_support::TempTree::new();
-        let root = tree.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(tree.path()).unwrap();
         tree.file_with(
             "ws/Cargo.toml",
             "[workspace]\nmembers = ['app']\nexclude = ['legacy']\n",
@@ -356,7 +356,7 @@ mod test_find_projects {
     #[test]
     fn cargo_membership_honors_an_explicit_workspace_over_the_nearest_one() {
         let tree = cli_tools_common::test_support::TempTree::new();
-        let workspace = tree.path().canonicalize().unwrap();
+        let workspace = dunce::canonicalize(tree.path()).unwrap();
         tree.file_with("Cargo.toml", "[workspace]\nmembers = ['nested/app']\n");
         tree.file_with("nested/Cargo.toml", "[workspace]\nmembers = []\n");
         tree.file_with(

@@ -616,6 +616,7 @@ dependencies = [
  "clap_complete",
  "cli-tools-common",
  "colored",
+ "dunce",
  "rayon",
  "regex",
  "reqwest",

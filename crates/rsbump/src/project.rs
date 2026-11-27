@@ -820,7 +820,7 @@ mod test_git_state {
     #[test]
     fn commit_changes_does_not_stage_untracked_files() {
         let temp = TempDir::new().expect("temp dir");
-        let root = temp.path().canonicalize().expect("canonical");
+        let root = dunce::canonicalize(temp.path()).expect("canonical");
         let run_git = |args: &[&str]| {
             let status = Command::new("git")
                 .args(args)
@@ -926,7 +926,7 @@ mod test_bump_manifest {
     #[test]
     fn members_with_their_own_rust_version_are_bumped() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let root = directory.path().canonicalize().expect("canonical directory");
+        let root = dunce::canonicalize(directory.path()).expect("canonical directory");
         let write = |relative: &str, content: &str| {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
@@ -961,12 +961,18 @@ mod test_bump_manifest {
         let report = process_project(&root, GitState::default(), &context);
 
         assert_eq!(report.outcome, Outcome::Updated);
-        assert!(report.entries.contains(&ReportEntry::RustVersionBumped {
-            manifest: "crates/own/Cargo.toml".to_string(),
-            location: FieldLocation::Package,
-            old: "1.90".to_string(),
-            new: "1.100".to_string(),
-        }));
+        assert!(
+            report.entries.contains(&ReportEntry::RustVersionBumped {
+                manifest: ["crates", "own", "Cargo.toml"]
+                    .iter()
+                    .collect::<PathBuf>()
+                    .display()
+                    .to_string(),
+                location: FieldLocation::Package,
+                old: "1.90".to_string(),
+                new: "1.100".to_string(),
+            })
+        );
         let own = fs::read_to_string(root.join("crates/own/Cargo.toml")).expect("read");
         assert!(own.contains("rust-version = \"1.100\""), "{own}");
         let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read");
