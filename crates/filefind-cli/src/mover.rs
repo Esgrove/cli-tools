@@ -37,7 +37,7 @@ mod transfer;
 
 use transfer::{MoveError, move_single_file};
 #[cfg(test)]
-use transfer::{copy_file_inner, copy_file_with_progress, is_cross_device_error};
+use transfer::{is_cross_device_error, move_by_verified_copy};
 
 /// Size of the buffer used for chunked file copying (256 KB).
 const COPY_BUFFER_SIZE: usize = 256 * 1024;
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_file_inner_success() {
+    fn test_move_by_verified_copy_success() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("source.bin");
         let dest_file = temp_dir.path().join("dest.bin");
@@ -1549,7 +1549,7 @@ mod tests {
         let abort_flag = AtomicBool::new(false);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_inner(
+        let result = move_by_verified_copy(
             &source_file,
             &dest_file,
             content.len() as u64,
@@ -1559,13 +1559,15 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(dest_file.exists());
+        assert!(!source_file.exists(), "source should be removed after a verified copy");
         let written = fs::read(&dest_file).expect("failed to read dest");
         assert_eq!(written.len(), content.len());
         assert_eq!(written, content);
+        assert_eq!(progress_bar.position(), content.len() as u64);
     }
 
     #[test]
-    fn test_copy_file_inner_size_mismatch() {
+    fn test_move_by_verified_copy_size_mismatch() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("source.bin");
         let dest_file = temp_dir.path().join("dest.bin");
@@ -1577,26 +1579,27 @@ mod tests {
         let progress_bar = ProgressBar::hidden();
 
         // Claim the file is 9999 bytes. The actual file is only 5 bytes
-        let result = copy_file_inner(&source_file, &dest_file, 9999, &progress_bar, &abort_flag);
+        let result = move_by_verified_copy(&source_file, &dest_file, 9999, &progress_bar, &abort_flag);
 
         assert!(matches!(result, Err(MoveError::Failed(_))));
+        assert_eq!(fs::read(&source_file).expect("source should be preserved"), content);
     }
 
     #[test]
-    fn test_copy_file_inner_abort_during_copy() {
+    fn test_move_by_verified_copy_abort() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("source.bin");
         let dest_file = temp_dir.path().join("dest.bin");
 
-        // Write enough data that the loop iterates at least once
+        // Write enough data for several copy chunks
         let content = vec![0u8; COPY_BUFFER_SIZE * 3];
         fs::write(&source_file, &content).expect("failed to write source");
 
-        // Set abort flag BEFORE starting. The copy loop checks it at the top
+        // Set abort flag BEFORE starting, so the copy never starts
         let abort_flag = AtomicBool::new(true);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_inner(
+        let result = move_by_verified_copy(
             &source_file,
             &dest_file,
             content.len() as u64,
@@ -1605,13 +1608,17 @@ mod tests {
         );
 
         assert!(matches!(result, Err(MoveError::Aborted)));
+        assert_eq!(progress_bar.position(), 0);
+        assert_eq!(fs::read(&source_file).expect("source should be preserved"), content);
     }
 
     #[test]
-    fn test_copy_file_with_progress_cleans_up_on_abort() {
+    fn test_move_by_verified_copy_cleans_up_on_abort() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir_all(&dest_dir).expect("failed to create dest dir");
         let source_file = temp_dir.path().join("source.bin");
-        let dest_file = temp_dir.path().join("dest.bin");
+        let dest_file = dest_dir.join("dest.bin");
 
         let content = vec![0u8; COPY_BUFFER_SIZE * 3];
         fs::write(&source_file, &content).expect("failed to write source");
@@ -1619,7 +1626,7 @@ mod tests {
         let abort_flag = AtomicBool::new(true);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_with_progress(
+        let result = move_by_verified_copy(
             &source_file,
             &dest_file,
             content.len() as u64,
@@ -1628,18 +1635,24 @@ mod tests {
         );
 
         assert!(matches!(result, Err(MoveError::Aborted)));
-        // The outer function should have cleaned up the partial destination file
         assert!(
             !dest_file.exists(),
             "partial destination file should be removed after abort"
         );
+        assert_eq!(
+            fs::read_dir(&dest_dir).expect("failed to read dest dir").count(),
+            0,
+            "no temporary copy should remain after abort"
+        );
     }
 
     #[test]
-    fn test_copy_file_with_progress_cleans_up_on_size_mismatch() {
+    fn test_move_by_verified_copy_cleans_up_on_size_mismatch() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir_all(&dest_dir).expect("failed to create dest dir");
         let source_file = temp_dir.path().join("source.bin");
-        let dest_file = temp_dir.path().join("dest.bin");
+        let dest_file = dest_dir.join("dest.bin");
 
         let content = b"small file";
         fs::write(&source_file, content).expect("failed to write source");
@@ -1648,18 +1661,23 @@ mod tests {
         let progress_bar = ProgressBar::hidden();
 
         // Claim expected size is much larger than actual. Triggers size mismatch
-        let result = copy_file_with_progress(&source_file, &dest_file, 9999, &progress_bar, &abort_flag);
+        let result = move_by_verified_copy(&source_file, &dest_file, 9999, &progress_bar, &abort_flag);
 
         assert!(matches!(result, Err(MoveError::Failed(_))));
-        // The outer function should have cleaned up the mismatched destination file
         assert!(
             !dest_file.exists(),
             "mismatched destination file should be removed after error"
         );
+        assert_eq!(
+            fs::read_dir(&dest_dir).expect("failed to read dest dir").count(),
+            0,
+            "no temporary copy should remain after a size mismatch"
+        );
+        assert_eq!(fs::read(&source_file).expect("source should be preserved"), content);
     }
 
     #[test]
-    fn test_copy_file_inner_source_not_found() {
+    fn test_move_by_verified_copy_source_not_found() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("nonexistent.bin");
         let dest_file = temp_dir.path().join("dest.bin");
@@ -1667,13 +1685,14 @@ mod tests {
         let abort_flag = AtomicBool::new(false);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_inner(&source_file, &dest_file, 100, &progress_bar, &abort_flag);
+        let result = move_by_verified_copy(&source_file, &dest_file, 100, &progress_bar, &abort_flag);
 
         assert!(matches!(result, Err(MoveError::Failed(_))));
+        assert!(!dest_file.exists());
     }
 
     #[test]
-    fn test_copy_file_inner_empty_file() {
+    fn test_move_by_verified_copy_empty_file() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("empty.bin");
         let dest_file = temp_dir.path().join("dest.bin");
@@ -1683,21 +1702,22 @@ mod tests {
         let abort_flag = AtomicBool::new(false);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_inner(&source_file, &dest_file, 0, &progress_bar, &abort_flag);
+        let result = move_by_verified_copy(&source_file, &dest_file, 0, &progress_bar, &abort_flag);
 
         assert!(result.is_ok());
         assert!(dest_file.exists());
+        assert!(!source_file.exists());
         assert_eq!(fs::read(&dest_file).expect("failed to read dest").len(), 0);
     }
 
     #[test]
-    fn test_copy_file_inner_large_file_multiple_chunks() {
+    fn test_move_by_verified_copy_large_file_multiple_chunks() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let source_file = temp_dir.path().join("large.bin");
         let dest_file = temp_dir.path().join("dest.bin");
 
-        // Create a file larger than COPY_BUFFER_SIZE to exercise multiple loop iterations
-        let size = COPY_BUFFER_SIZE * 2 + 1234;
+        // Larger than two of the shared 1 MiB copy chunks to exercise multiple loop iterations
+        let size = 2 * 1024 * 1024 + 1234;
         let mut file = File::create(&source_file).expect("failed to create source");
         let chunk = vec![0xABu8; size];
         file.write_all(&chunk).expect("failed to write source");
@@ -1706,12 +1726,13 @@ mod tests {
         let abort_flag = AtomicBool::new(false);
         let progress_bar = ProgressBar::hidden();
 
-        let result = copy_file_inner(&source_file, &dest_file, size as u64, &progress_bar, &abort_flag);
+        let result = move_by_verified_copy(&source_file, &dest_file, size as u64, &progress_bar, &abort_flag);
 
         assert!(result.is_ok());
         let written = fs::read(&dest_file).expect("failed to read dest");
         assert_eq!(written.len(), size);
         assert!(written.iter().all(|&byte| byte == 0xAB));
+        assert_eq!(progress_bar.position(), size as u64);
     }
 
     #[test]
