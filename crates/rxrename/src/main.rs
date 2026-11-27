@@ -391,7 +391,7 @@ fn process_file_in_batch(
 
 /// Move a file to system trash without a permanent deletion fallback.
 fn trash_file(path: &Path) -> std::io::Result<()> {
-    trash::delete(path).map_err(std::io::Error::other)
+    cli_tools_common::move_to_trash(path)
 }
 
 /// Stage the old destination on the same volume, then trash it only after the replacement is installed.

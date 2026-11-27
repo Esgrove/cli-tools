@@ -20,7 +20,7 @@ impl VideoConvert<'_> {
             std::fs::remove_file(path).context("Failed to delete original file")?;
         } else {
             self.observer.deleting(path, DeleteMethod::Trash);
-            trash::delete(path).context("Failed to move original file to trash")?;
+            cli_tools_common::move_to_trash(path).context("Failed to move original file to trash")?;
         }
         Ok(())
     }

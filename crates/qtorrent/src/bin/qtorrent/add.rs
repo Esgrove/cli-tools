@@ -328,7 +328,7 @@ fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
 ///
 /// Errors are reported as warnings. They do not abort the surrounding workflow.
 fn trash_duplicate_torrent_file(torrent_path: &Path) {
-    match trash::delete(torrent_path) {
+    match cli_tools_common::move_to_trash(torrent_path) {
         Ok(()) => {
             println!(
                 "  {} Trashed duplicate torrent file: {}",

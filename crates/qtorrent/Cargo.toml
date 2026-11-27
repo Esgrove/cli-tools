@@ -27,7 +27,6 @@ cli = [
     "dep:clap",
     "dep:clap_complete",
     "dep:colored",
-    "dep:trash",
     "tokio/full",
 ]
 
@@ -49,7 +48,6 @@ walkdir = { workspace = true }
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
-trash = { workspace = true, optional = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

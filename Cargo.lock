@@ -604,7 +604,6 @@ dependencies = [
  "sha1",
  "tempfile",
  "tokio",
- "trash",
  "walkdir",
 ]
 
@@ -636,7 +635,6 @@ dependencies = [
  "clap_complete",
  "cli-tools-common",
  "tempfile",
- "trash",
  "walkdir",
 ]
 
@@ -701,7 +699,6 @@ dependencies = [
  "serde",
  "tempfile",
  "toml",
- "trash",
  "walkdir",
 ]
 
