@@ -279,7 +279,6 @@ A binary only crate keeps its binary in `src/main.rs`.
         - `config.rs` - The `filefind.toml` user config with the daemon and CLI sections
         - `database.rs` - `SQLite` index database with volumes and files keyed by full path
         - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
-        - `output.rs` - Terminal messages and human readable formatting
         - `types.rs` - File entries, volumes, and file change events
         - `completion.rs` - Shell completion generation
     - `crates/filefind-cli/` → `filefind` - Search the index, find duplicates, and move matching files

@@ -16,7 +16,6 @@ The other filefind crates have their own `AGENTS.md`:
 - `config.rs` - User configuration file handling
 - `database.rs` - `SQLite` index database operations
 - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
-- `output.rs` - Terminal messages and human readable formatting
 - `types.rs` - File entries, volumes, and file change events
 
 ## Database

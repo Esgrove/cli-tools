@@ -26,14 +26,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
+use cli_tools_common::{format_size, print_error, print_green, print_yellow};
 use filefind_common::database::Database;
 #[cfg(windows)]
 use filefind_common::get_volume_prefix;
 use filefind_common::types::FileEntry;
-use filefind_common::{
-    extract_drive_letter, format_size, get_unc_for_drive, print_error, print_success, print_warning,
-    strip_prefix_ignore_case,
-};
+use filefind_common::{extract_drive_letter, get_unc_for_drive, strip_prefix_ignore_case};
 
 mod transfer;
 
@@ -695,7 +693,7 @@ fn deduplicate_identical_file(
         Ok(true) => {
             if let Err(error) = fs::remove_file(&staged_source) {
                 let preserved = backup.keep();
-                print_warning!(
+                print_yellow!(
                     "Duplicate source was indexed as removed but remains at {}: {}",
                     preserved.display(),
                     error
@@ -798,7 +796,7 @@ fn move_indexed_file(
             && let Err(error) = fs::remove_file(&backup_path)
         {
             let preserved = directory.keep();
-            print_warning!(
+            print_yellow!(
                 "Moved file, but failed to remove old destination backup at {}: {}",
                 preserved.display(),
                 error
@@ -970,7 +968,7 @@ fn print_summary(summary: &MoveSummary) {
     println!();
 
     if summary.moved > 0 {
-        print_success!(
+        print_green!(
             "Moved {} files ({})",
             summary.moved,
             format_size(summary.total_size_moved)
@@ -998,7 +996,7 @@ fn print_summary(summary: &MoveSummary) {
     }
 
     if summary.aborted {
-        print_warning!("Operation was aborted by user");
+        print_yellow!("Operation was aborted by user");
     }
 }
 

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use indicatif::ProgressBar;
 
-use filefind_common::print_warning;
+use cli_tools_common::print_yellow;
 
 use super::COPY_BUFFER_SIZE;
 
@@ -76,7 +76,7 @@ pub(super) fn move_single_file(
             // since the copy path is a safe fallback.
             if !is_cross_device_error(&rename_error) {
                 progress_bar.suspend(|| {
-                    print_warning!(
+                    print_yellow!(
                         "Rename failed for {} -> {} (error: {rename_error}), falling back to copy",
                         source.display(),
                         destination.display(),
@@ -107,7 +107,7 @@ pub(super) fn move_single_file(
     if copied_size != expected_size {
         // Size mismatch: delete the bad copy and report error
         if let Err(cleanup_error) = fs::remove_file(destination) {
-            print_warning!(
+            print_yellow!(
                 "Failed to clean up mismatched copy at {}: {cleanup_error}",
                 destination.display()
             );
@@ -155,12 +155,12 @@ pub(super) fn copy_file_with_progress(
             // succeeded there is nothing to remove.
             if destination.exists() {
                 if is_abort {
-                    print_warning!(
+                    print_yellow!(
                         "Failed to clean up partial file after abort at {}: {cleanup_error}",
                         destination.display()
                     );
                 } else {
-                    print_warning!(
+                    print_yellow!(
                         "Failed to clean up partial file at {}: {cleanup_error}",
                         destination.display()
                     );

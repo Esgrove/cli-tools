@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use cli_tools_common::{format_number, print_cyan, print_error, print_green, print_yellow};
 use colored::Colorize;
 use filefind_common::{
     Config, DaemonStateInfo, Database, FileChangeEvent, FileEntry, IpcClient, extract_drive_letter_from_str,
-    format_number, print_cyan, print_error, print_success, print_warning,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -253,7 +253,7 @@ impl Daemon {
         self.state = DaemonState::Running;
         self.ipc_state.state.store(DaemonStateInfo::Running);
         if self.verbose() {
-            print_success!("Daemon started successfully");
+            print_green!("Daemon started successfully");
         }
 
         Ok(())
@@ -292,7 +292,7 @@ impl Daemon {
         self.state = DaemonState::Stopped;
         self.ipc_state.state.store(DaemonStateInfo::Stopped);
         if self.config.daemon.verbose {
-            print_success!("Daemon stopped");
+            print_green!("Daemon stopped");
         }
     }
 
@@ -1119,7 +1119,7 @@ fn spawn_background_daemon(rescan: bool) -> Result<()> {
 
     let child = command.spawn().context("Failed to spawn background daemon process")?;
 
-    print_success!("Daemon started in background (PID: {})", child.id());
+    print_green!("Daemon started in background (PID: {})", child.id());
     print_cyan!("Use 'filefindd status' to check daemon status");
     print_cyan!("Use 'filefindd stop' to stop the daemon");
 
@@ -1133,19 +1133,19 @@ pub fn stop_daemon() {
     let client = IpcClient::new();
 
     if !client.is_daemon_running() {
-        print_warning!("Daemon is not running");
+        print_yellow!("Daemon is not running");
         return;
     }
 
     match client.stop_daemon() {
         Ok(()) => {
-            print_success!("Stop command sent to daemon");
+            print_green!("Stop command sent to daemon");
             // Wait a moment and check if it stopped
             std::thread::sleep(std::time::Duration::from_millis(500));
             if client.is_daemon_running() {
-                print_warning!("Daemon is still running - it may take a moment to shut down");
+                print_yellow!("Daemon is still running - it may take a moment to shut down");
             } else {
-                print_success!("Daemon stopped");
+                print_green!("Daemon stopped");
             }
         }
         Err(error) => {
@@ -1205,7 +1205,7 @@ pub fn show_status(config: &Config) -> Result<()> {
     if database_path.exists() {
         println!("  Database:     {}", database_path.display());
         if let Ok(metadata) = std::fs::metadata(&database_path) {
-            println!("  DB size:      {}", filefind_common::format_size(metadata.len()));
+            println!("  DB size:      {}", cli_tools_common::format_size(metadata.len()));
         }
     }
 
@@ -1249,13 +1249,13 @@ pub fn show_stats(config: &Config) -> Result<()> {
     println!("  Files:          {}", format_number(stats.total_files));
     println!("  Directories:    {}", format_number(stats.total_directories));
     println!("  Volumes:        {}", stats.volume_count);
-    println!("  Total size:     {}", filefind_common::format_size(stats.total_size));
+    println!("  Total size:     {}", cli_tools_common::format_size(stats.total_size));
     println!();
     println!("  Database:       {}", database_path.display());
 
     // Show database file size
     if let Ok(metadata) = std::fs::metadata(&database_path) {
-        println!("  DB file size:   {}", filefind_common::format_size(metadata.len()));
+        println!("  DB file size:   {}", cli_tools_common::format_size(metadata.len()));
     }
 
     Ok(())

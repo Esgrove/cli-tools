@@ -8,11 +8,10 @@ use anyhow::{Result, bail};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
+use cli_tools_common::{format_number, format_size, print_error, print_magenta_bold, print_red_bold};
 use filefind_common::config::OutputFormat;
 use filefind_common::types::FileEntry;
-use filefind_common::{
-    Database, IndexedVolume, format_number, format_size, print_bold_magenta, print_bold_red, print_error,
-};
+use filefind_common::{Database, IndexedVolume};
 
 use crate::config::CliConfig;
 use crate::hyperlink::Hyperlinker;
@@ -284,7 +283,7 @@ pub fn show_duplicates(
         if index > 0 {
             println!();
         }
-        print_bold_magenta!("{} ({})", stem, files.len());
+        print_magenta_bold!("{} ({})", stem, files.len());
         for file in files {
             println!(
                 "  {:>10}  {}",
@@ -351,7 +350,7 @@ fn display_grouped_output(
             // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
                 // Directory no longer exists: print in red and remove from database
-                print_bold_red!("{}", &directory.full_path);
+                print_red_bold!("{}", &directory.full_path);
                 delete_missing_directory(database, &directory.full_path);
                 continue;
             }
@@ -399,7 +398,7 @@ fn display_grouped(
         // Check if directory exists on disk
         if !utils::check_directory_exists(&directory.full_path) {
             // Directory no longer exists: print in red and remove from database
-            print_bold_red!("{}", &directory.full_path);
+            print_red_bold!("{}", &directory.full_path);
             delete_missing_directory(database, &directory.full_path);
             println!();
             continue;
@@ -473,7 +472,7 @@ fn display_name(
     } else if config.directories_only {
         for directory in directories {
             if !utils::check_directory_exists(&directory.full_path) {
-                print_bold_red!("{}", &directory.name);
+                print_red_bold!("{}", &directory.name);
                 delete_missing_directory(database, &directory.full_path);
                 continue;
             }
@@ -488,7 +487,7 @@ fn display_name(
     } else {
         for directory in directories {
             if !utils::check_directory_exists(&directory.full_path) {
-                print_bold_red!("{}", &directory.name);
+                print_red_bold!("{}", &directory.name);
                 delete_missing_directory(database, &directory.full_path);
                 continue;
             }
@@ -525,7 +524,7 @@ fn display_list(
             // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
                 // Directory no longer exists: print in red and remove from database
-                print_bold_red!("{}", &directory.full_path);
+                print_red_bold!("{}", &directory.full_path);
                 delete_missing_directory(database, &directory.full_path);
                 continue;
             }
@@ -544,7 +543,7 @@ fn display_list(
             // Check if directory exists on disk
             if !utils::check_directory_exists(&directory.full_path) {
                 // Directory no longer exists: print in red and remove from database
-                print_bold_red!("{}", &directory.full_path);
+                print_red_bold!("{}", &directory.full_path);
                 delete_missing_directory(database, &directory.full_path);
                 continue;
             }

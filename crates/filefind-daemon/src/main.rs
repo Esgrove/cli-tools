@@ -24,7 +24,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[cfg(windows)]
 use windows::Win32::System::Console::FreeConsole;
 
-use filefind_common::{Config, LogLevel, format_number, get_log_directory, print_cyan, print_success};
+use cli_tools_common::{format_number, print_cyan, print_green};
+use filefind_common::{Config, LogLevel, get_log_directory};
 
 /// Background file indexing daemon for filefind
 #[derive(Parser)]
@@ -292,7 +293,7 @@ fn run_prune(config: &Config) -> Result<()> {
 
     let stats = pruner::prune_missing_entries(&database, config.daemon.verbose)?;
 
-    print_success!(
+    print_green!(
         "Prune complete: removed {} files and {} directories ({} entries checked, {} checks skipped)",
         format_number(stats.files_removed),
         format_number(stats.directories_removed),

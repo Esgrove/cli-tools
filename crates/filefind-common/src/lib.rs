@@ -23,7 +23,6 @@ pub mod config;
 pub mod database;
 #[cfg(feature = "ipc")]
 pub mod ipc;
-mod output;
 pub mod types;
 
 pub use completion::generate_shell_completion;
@@ -32,10 +31,6 @@ pub use database::{Database, VolumeStats};
 #[cfg(feature = "ipc")]
 pub use ipc::{
     DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, IpcClient, get_ipc_path, read_message, write_message,
-};
-pub use output::{
-    format_number, format_size, print_bold_magenta, print_bold_red, print_bold_yellow, print_cyan, print_error,
-    print_success, print_warning,
 };
 pub use types::{FileChangeEvent, FileEntry, IndexedVolume, VolumeType};
 
@@ -871,61 +866,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_size_bytes() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(1), "1 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1023), "1023 B");
-    }
-
-    #[test]
-    fn test_format_size_kilobytes() {
-        assert_eq!(format_size(1024), "1.00 KB");
-        assert_eq!(format_size(1536), "1.50 KB");
-        assert_eq!(format_size(2048), "2.00 KB");
-        assert_eq!(format_size(1024 * 1023), "1023.00 KB");
-    }
-
-    #[test]
-    fn test_format_size_megabytes() {
-        assert_eq!(format_size(1_048_576), "1.00 MB");
-        assert_eq!(format_size(1_572_864), "1.50 MB");
-        assert_eq!(format_size(10_485_760), "10.00 MB");
-        assert_eq!(format_size(104_857_600), "100.00 MB");
-    }
-
-    #[test]
-    fn test_format_size_gigabytes() {
-        assert_eq!(format_size(1_073_741_824), "1.00 GB");
-        assert_eq!(format_size(1_610_612_736), "1.50 GB");
-        assert_eq!(format_size(10_737_418_240), "10.00 GB");
-        assert_eq!(format_size(107_374_182_400), "100.00 GB");
-    }
-
-    #[test]
-    fn test_format_size_terabytes() {
-        assert_eq!(format_size(1_099_511_627_776), "1.00 TB");
-        assert_eq!(format_size(1_649_267_441_664), "1.50 TB");
-        assert_eq!(format_size(10_995_116_277_760), "10.00 TB");
-    }
-
-    #[test]
-    fn test_format_size_large_values() {
-        // Test very large values (petabyte range, still shown as TB)
-        assert_eq!(format_size(1_125_899_906_842_624), "1024.00 TB");
-        assert_eq!(format_size(u64::MAX), "16777216.00 TB");
-    }
-
-    #[test]
-    fn test_format_size_boundary_values() {
-        // Just below each boundary
-        assert_eq!(format_size(1023), "1023 B");
-        assert_eq!(format_size(1024 * 1024 - 1), "1024.00 KB");
-        assert_eq!(format_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
-        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024 - 1), "1024.00 GB");
-    }
-
-    #[test]
     fn test_project_name_constant() {
         assert_eq!(PROJECT_NAME, "filefind");
         assert_ne!(PROJECT_NAME, "");
@@ -956,19 +896,6 @@ mod tests {
         assert_eq!(classify_path(Path::new("")), PathType::LocalDirectory);
     }
 
-    #[test]
-    fn test_format_size_precision() {
-        // Test that decimal formatting is correct
-        // 1.5 KB = 1536 bytes
-        let result = format_size(1536);
-        assert!(result.contains("1.50"));
-
-        // Test rounding - 1.999... should round to 2.00
-        let result = format_size(2047);
-        // 2047 / 1024 = 1.9990234375
-        assert!(result.contains("KB"));
-    }
-
     #[cfg(not(windows))]
     #[test]
     fn test_is_mapped_network_drive_non_windows() {
@@ -976,47 +903,6 @@ mod tests {
         assert!(!is_mapped_network_drive(Path::new("C:\\")));
         assert!(!is_mapped_network_drive(Path::new("Z:\\")));
         assert!(!is_mapped_network_drive(Path::new(r"\\server\share")));
-    }
-
-    #[test]
-    fn test_format_number_zero() {
-        assert_eq!(format_number(0), "0");
-    }
-
-    #[test]
-    fn test_format_number_small() {
-        assert_eq!(format_number(1), "1");
-        assert_eq!(format_number(12), "12");
-        assert_eq!(format_number(123), "123");
-        assert_eq!(format_number(999), "999");
-    }
-
-    #[test]
-    fn test_format_number_thousands() {
-        assert_eq!(format_number(1000), "1,000");
-        assert_eq!(format_number(1234), "1,234");
-        assert_eq!(format_number(12345), "12,345");
-        assert_eq!(format_number(123_456), "123,456");
-    }
-
-    #[test]
-    fn test_format_number_millions() {
-        assert_eq!(format_number(1_000_000), "1,000,000");
-        assert_eq!(format_number(1_234_567), "1,234,567");
-        assert_eq!(format_number(12_345_678), "12,345,678");
-        assert_eq!(format_number(123_456_789), "123,456,789");
-    }
-
-    #[test]
-    fn test_format_number_billions() {
-        assert_eq!(format_number(1_000_000_000), "1,000,000,000");
-        assert_eq!(format_number(1_234_567_890), "1,234,567,890");
-    }
-
-    #[test]
-    fn test_format_number_large() {
-        // Test u64 max value
-        assert_eq!(format_number(u64::MAX), "18,446,744,073,709,551,615");
     }
 
     #[test]

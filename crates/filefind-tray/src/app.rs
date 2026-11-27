@@ -23,7 +23,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, SW_HIDE, TranslateMessage, WM_QUIT,
 };
 
-use filefind_common::{DaemonStateInfo, DaemonStatus, IpcClient, format_number};
+use cli_tools_common::format_number;
+use filefind_common::{DaemonStateInfo, DaemonStatus, IpcClient};
 
 use crate::icons;
 

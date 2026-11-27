@@ -16,7 +16,6 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
-colored = { workspace = true }
 dirs = { workspace = true }
 postcard = { workspace = true, optional = true }
 regex = { workspace = true }

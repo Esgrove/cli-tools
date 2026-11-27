@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+cli-tools-common = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
