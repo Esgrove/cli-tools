@@ -29,7 +29,7 @@ use filefind_common::{
 };
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::mft::{MftScanner, detect_ntfs_volumes};
 use crate::pruner::prune_multiple_volumes;
@@ -45,6 +45,8 @@ struct CategorizedPaths {
     /// Local directories without a drive letter (Unix paths).
     /// Scanned with directory walking since MFT requires a drive letter.
     plain_directories: Vec<PathBuf>,
+    /// Configured paths that could not be accessed during categorization.
+    inaccessible_paths: Vec<String>,
 }
 
 /// Result from a scan operation.
@@ -122,14 +124,12 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
 
     if !is_path_accessible(scan_path) {
         if is_drive_letter_path(scan_path) {
-            error!(
+            anyhow::bail!(
                 "Path not accessible: {} (if this is a mapped network drive, try using a UNC path instead)",
                 scan_path.display()
             );
-        } else {
-            error!("Path not accessible: {}", scan_path.display());
         }
-        return Ok(());
+        anyhow::bail!("Path not accessible: {}", scan_path.display());
     }
 
     let start_time = Instant::now();
@@ -182,18 +182,75 @@ pub async fn scan_single_path(database: &mut Database, scan_path: &Path, config:
     Ok(())
 }
 
+/// Validate that `config` names at least one usable index root for the current platform.
+///
+/// On Unix, `[daemon].paths` must contain explicit absolute directories.
+/// On Windows, an empty list falls back to detected local NTFS volumes.
+///
+/// # Errors
+/// Returns an actionable error naming the config file path when no usable root is configured.
+pub fn validate_configured_roots(config: &Config) -> Result<()> {
+    let config_path = Config::expected_config_path();
+
+    #[cfg(not(windows))]
+    {
+        if config.daemon.paths.is_empty() {
+            anyhow::bail!(
+                "No index paths configured.\n\
+                 Add one or more absolute directories to [daemon].paths in {}, for example:\n\
+                 \n\
+                 [daemon]\n\
+                 paths = [\"/Users/you/Documents\", \"/Volumes/Media\"]\n\
+                 \n\
+                 Or scan one directory directly with: filefindd scan /path/to/directory",
+                config_path.display()
+            );
+        }
+
+        let relative_paths: Vec<&str> = config
+            .daemon
+            .paths
+            .iter()
+            .filter(|entry| !Path::new(entry).is_absolute())
+            .map(String::as_str)
+            .collect();
+        if !relative_paths.is_empty() {
+            anyhow::bail!(
+                "Configured [daemon].paths in {} must use absolute directories on Unix: {}",
+                config_path.display(),
+                relative_paths.join(", ")
+            );
+        }
+    }
+
+    if collect_paths_to_scan(config).is_none() {
+        anyhow::bail!(
+            "No accessible index paths found. Check [daemon].paths in {}",
+            config_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Scan all configured paths, or auto-detect NTFS volumes if none are configured.
 ///
 /// # Arguments
 /// * `database` - Database to store entries in
 /// * `config` - Configuration settings
 pub async fn scan_configured_paths(database: &mut Database, config: &Config) -> Result<()> {
+    validate_configured_roots(config)?;
     let clean_scan = should_clean_scan(database, config)?;
     let total_start = Instant::now();
 
     let Some(categorized) = collect_paths_to_scan(config) else {
-        return Ok(());
+        anyhow::bail!(
+            "No accessible index paths found. Check [daemon].paths in {}",
+            Config::expected_config_path().display()
+        );
     };
+
+    let inaccessible_count = categorized.inaccessible_paths.len();
 
     let total_tasks = categorized.task_count();
     if total_tasks == 1 {
@@ -206,42 +263,7 @@ pub async fn scan_configured_paths(database: &mut Database, config: &Config) -> 
 
     // Track which volumes need pruning (non-NTFS volumes in incremental mode)
     let mut non_ntfs_volume_ids: Vec<i64> = Vec::new();
-
-    // Build all scan tasks - each task fully handles its path
-    let mut tasks: Vec<tokio::task::JoinHandle<Vec<ScanResult>>> = Vec::with_capacity(total_tasks);
-
-    // NTFS drive roots (blocking, no fallback needed)
-    for drive_letter in categorized.ntfs_drive_roots {
-        let scope = Arc::clone(&scope);
-        tasks.push(tokio::task::spawn_blocking(move || {
-            vec![scan_ntfs_drive(drive_letter, &scope)]
-        }));
-    }
-
-    // Local directories (MFT with filtering, fallback to directory walk)
-    for (drive_letter, paths) in categorized.local_paths_by_drive {
-        let scope = Arc::clone(&scope);
-        tasks.push(tokio::spawn(async move {
-            scan_local_directories(drive_letter, paths, scope).await
-        }));
-    }
-
-    // Mapped network drives (try MFT, fallback to directory walk)
-    for (drive_letter, scan_path) in categorized.mapped_network_drives {
-        let scope = Arc::clone(&scope);
-        tasks.push(tokio::spawn(async move {
-            vec![scan_mapped_drive(drive_letter, scan_path, scope).await]
-        }));
-    }
-
-    // UNC paths and plain directories without a drive letter (directory walk only)
-    for scan_path in categorized.unc_paths.into_iter().chain(categorized.plain_directories) {
-        let label = scan_path.to_string_lossy().into_owned();
-        let scope = Arc::clone(&scope);
-        tasks.push(tokio::spawn(async move {
-            vec![scan_path_directory(scan_path, label, scope).await]
-        }));
-    }
+    let tasks = spawn_scan_tasks(categorized, &scope);
 
     // Capture the maximum file ID before processing any results.
     // This allows the pruner to skip entries that are inserted during this scan.
@@ -256,7 +278,7 @@ pub async fn scan_configured_paths(database: &mut Database, config: &Config) -> 
     // Process results as they complete using FuturesUnordered
     let mut futures: FuturesUnordered<_> = tasks.into_iter().collect();
     let mut total_entries = 0usize;
-    let mut failed_paths = 0usize;
+    let mut failed_paths = inaccessible_count;
 
     while let Some(result) = futures.next().await {
         match result {
@@ -699,12 +721,14 @@ fn categorize_paths(paths_to_scan: Vec<String>) -> CategorizedPaths {
     let mut mapped_network_drives: Vec<(char, PathBuf)> = Vec::new();
     let mut unc_paths: Vec<PathBuf> = Vec::new();
     let mut plain_directories: Vec<PathBuf> = Vec::new();
+    let mut inaccessible_paths: Vec<String> = Vec::new();
 
     for path_str in paths_to_scan {
         let scan_path = PathBuf::from(&path_str);
 
         if !is_path_accessible(&scan_path) {
             log_inaccessible_scan_path(&scan_path);
+            inaccessible_paths.push(path_str);
             continue;
         }
 
@@ -744,6 +768,7 @@ fn categorize_paths(paths_to_scan: Vec<String>) -> CategorizedPaths {
         mapped_network_drives,
         unc_paths,
         plain_directories,
+        inaccessible_paths,
     }
 }
 
@@ -780,6 +805,45 @@ fn log_inaccessible_scan_path(path: &Path) {
     } else {
         warn!("Skipping inaccessible path: {}", path.display());
     }
+}
+
+/// Spawn one async or blocking scan task per categorized root.
+fn spawn_scan_tasks(
+    categorized: CategorizedPaths,
+    scope: &Arc<IndexScope>,
+) -> Vec<tokio::task::JoinHandle<Vec<ScanResult>>> {
+    let mut tasks: Vec<tokio::task::JoinHandle<Vec<ScanResult>>> = Vec::with_capacity(categorized.task_count());
+
+    for drive_letter in categorized.ntfs_drive_roots {
+        let scope = Arc::clone(scope);
+        tasks.push(tokio::task::spawn_blocking(move || {
+            vec![scan_ntfs_drive(drive_letter, &scope)]
+        }));
+    }
+
+    for (drive_letter, paths) in categorized.local_paths_by_drive {
+        let scope = Arc::clone(scope);
+        tasks.push(tokio::spawn(async move {
+            scan_local_directories(drive_letter, paths, scope).await
+        }));
+    }
+
+    for (drive_letter, scan_path) in categorized.mapped_network_drives {
+        let scope = Arc::clone(scope);
+        tasks.push(tokio::spawn(async move {
+            vec![scan_mapped_drive(drive_letter, scan_path, scope).await]
+        }));
+    }
+
+    for scan_path in categorized.unc_paths.into_iter().chain(categorized.plain_directories) {
+        let label = scan_path.to_string_lossy().into_owned();
+        let scope = Arc::clone(scope);
+        tasks.push(tokio::spawn(async move {
+            vec![scan_path_directory(scan_path, label, scope).await]
+        }));
+    }
+
+    tasks
 }
 
 /// Scan an NTFS drive root (full drive, no filtering).
@@ -1309,6 +1373,7 @@ mod tests {
             mapped_network_drives: Vec::new(),
             unc_paths: Vec::new(),
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 0);
     }
@@ -1321,6 +1386,7 @@ mod tests {
             mapped_network_drives: Vec::new(),
             unc_paths: Vec::new(),
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 2);
     }
@@ -1335,6 +1401,7 @@ mod tests {
             mapped_network_drives: vec![('Z', PathBuf::from("Z:\\"))],
             unc_paths: vec![PathBuf::from("\\\\server\\share")],
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 4);
     }
@@ -1351,6 +1418,7 @@ mod tests {
             mapped_network_drives: Vec::new(),
             unc_paths: Vec::new(),
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 2);
     }
@@ -2605,6 +2673,7 @@ mod tests {
                 PathBuf::from("\\\\server3\\share"),
             ],
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         // 3 NTFS roots + 2 local drive groups + 2 mapped drives + 3 UNC = 10
         assert_eq!(paths.task_count(), 10);
@@ -2618,6 +2687,7 @@ mod tests {
             mapped_network_drives: Vec::new(),
             unc_paths: vec![PathBuf::from("\\\\server\\share")],
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 1);
     }
@@ -2630,7 +2700,71 @@ mod tests {
             mapped_network_drives: vec![('Z', PathBuf::from("Z:\\"))],
             unc_paths: Vec::new(),
             plain_directories: Vec::new(),
+            inaccessible_paths: Vec::new(),
         };
         assert_eq!(paths.task_count(), 1);
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(windows))]
+mod test_unix_root_validation {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn empty_config_fails_with_config_path_and_example() {
+        let error = validate_configured_roots(&Config::default()).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("No index paths configured"), "{message}");
+        assert!(message.contains("[daemon]"), "{message}");
+        assert!(message.contains("paths ="), "{message}");
+    }
+
+    #[test]
+    fn relative_path_is_rejected_on_unix() {
+        let mut config = Config::default();
+        config.daemon.paths = vec!["relative/dir".to_string()];
+        let error = validate_configured_roots(&config).unwrap_err();
+        assert!(error.to_string().contains("absolute"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn missing_explicit_scan_path_returns_error() {
+        let temp = tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let missing = temp.path().join("does-not-exist");
+
+        let result = scan_single_path(&mut database, &missing, &Config::default()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn partial_inaccessible_root_still_indexes_readable_root_and_reports_error() {
+        let temp = tempdir().unwrap();
+        let readable = temp.path().join("readable");
+        let missing = temp.path().join("missing");
+        fs::create_dir(&readable).unwrap();
+        fs::write(readable.join("found.txt"), "hello").unwrap();
+
+        let mut config = Config::default();
+        config.daemon.paths = vec![
+            readable.to_string_lossy().into_owned(),
+            missing.to_string_lossy().into_owned(),
+        ];
+
+        let mut database = Database::open_in_memory().unwrap();
+        let result = scan_configured_paths(&mut database, &config).await;
+        assert!(result.is_err(), "missing configured root should report partial failure");
+        assert!(
+            database
+                .get_file_by_path(&readable.join("found.txt").to_string_lossy())
+                .unwrap()
+                .is_some(),
+            "readable root must still be indexed"
+        );
     }
 }

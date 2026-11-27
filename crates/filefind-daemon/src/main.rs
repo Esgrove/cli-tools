@@ -132,9 +132,9 @@ fn main() -> Result<()> {
         hide_console_window();
     }
 
-    // Determine if we're running in foreground mode
-    let foreground = matches!(args.command, Some(Command::Start { foreground: true, .. }) | None)
-        || !matches!(args.command, Some(Command::Start { .. }));
+    // Determine whether this invocation should log to a rolling file rather than console.
+    let use_file_logging = matches!(args.command, Some(Command::Start { foreground: false, .. }))
+        || (matches!(args.command, Some(Command::Start { foreground: true, .. })) && !std::io::stdout().is_terminal());
 
     // Extract force flag from Scan command if present
     let force_clean_scan = match &args.command {
@@ -142,12 +142,12 @@ fn main() -> Result<()> {
         _ => None,
     };
 
-    // Load config and apply CLI args (CLI takes precedence)
-    let mut config = Config::load();
+    // Load config strictly so malformed TOML reports an actionable error instead of silently using defaults.
+    let mut config = Config::load_strict()?;
     apply_cli_args(&mut config, args.log_level, args.verbose, force_clean_scan);
 
     // Initialize logging based on mode
-    init_logging(config.daemon.log_level, foreground)?;
+    init_logging(config.daemon.log_level, use_file_logging)?;
 
     tracing::debug!("Loaded configuration");
     tracing::trace!("{config:#?}");
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
         Some(Command::Stats) => daemon::show_stats(&config),
         Some(Command::Volumes { detailed }) => daemon::list_volumes(&config.database_path(), detailed),
         Some(Command::Detect) => {
-            daemon::detect_drives();
+            daemon::detect_drives(&config);
             Ok(())
         }
         Some(Command::Reset { force }) => reset_database(&config.database_path(), force),
@@ -183,21 +183,14 @@ fn main() -> Result<()> {
     }
 }
 
-/// Initialize logging based on log level and foreground mode.
+/// Initialize logging based on log level and whether the daemon is running detached.
 ///
-/// In foreground mode with a terminal attached, logs go to stdout.
-/// In background mode, or when stdout is not a terminal
-/// (e.g. spawned as a detached process by `spawn_background_daemon` or a scheduled task),
-/// logs go to rolling files in `~/logs/filefind/`.
-fn init_logging(log_level: LogLevel, foreground: bool) -> Result<()> {
+/// Interactive commands and piped status/query commands log to stdout without creating log files.
+/// Detached daemon processes log to rolling daily files in `~/logs/filefind/`.
+fn init_logging(log_level: LogLevel, use_file_logging: bool) -> Result<()> {
     let filter = EnvFilter::new(log_level.as_filter_str());
 
-    let use_stdout = foreground && std::io::stdout().is_terminal();
-
-    if use_stdout {
-        // Interactive foreground mode: log to stdout
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    } else {
+    if use_file_logging {
         // Background or detached mode: log to file
         let log_dir = get_log_directory()?;
         std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
@@ -219,6 +212,8 @@ fn init_logging(log_level: LogLevel, foreground: bool) -> Result<()> {
                     .with_ansi(false),
             )
             .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     Ok(())

@@ -31,7 +31,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::ipc_server::{IpcServerState, IpcToDaemon, spawn_ipc_server};
 use crate::mft::detect_ntfs_volumes;
 use crate::pruner::prune_missing_entries;
-use crate::scanner::{deleted_references, run_scan};
+use crate::scanner::{deleted_references, run_scan, validate_configured_roots};
 use crate::usn::{UsnChange, UsnMonitor};
 use crate::watcher::FileWatcher;
 
@@ -246,10 +246,8 @@ impl Daemon {
         self.start_monitors();
         self.last_periodic_scan = Instant::now();
 
-        // Update monitored volumes count
-        self.ipc_state
-            .monitored_volumes
-            .store(self.volume_monitors.len() as u64, Ordering::Relaxed);
+        // Update monitored volumes count (USN volume monitors plus active watched roots).
+        self.update_monitored_volumes_count();
 
         self.state = DaemonState::Running;
         self.ipc_state.state.store(DaemonStateInfo::Running);
@@ -448,6 +446,7 @@ impl Daemon {
             warn!("File watcher could not restart: {error:#}");
             failed_monitors += 1;
         }
+        self.update_monitored_volumes_count();
         result?;
         cache_result?;
         if failed_monitors > 0 {
@@ -539,6 +538,16 @@ impl Daemon {
         self.file_watcher = Some(watcher);
 
         Ok(())
+    }
+
+    /// Update the IPC status gauge with the total number of active USN monitors and OS watches.
+    fn update_monitored_volumes_count(&self) {
+        let watched = self
+            .file_watcher
+            .as_ref()
+            .map_or(0, FileWatcher::registered_watch_count);
+        let total = self.volume_monitors.len() + watched;
+        self.ipc_state.monitored_volumes.store(total as u64, Ordering::Relaxed);
     }
 
     /// Extract drive letters from configured paths.
@@ -1081,6 +1090,7 @@ impl Default for DaemonOptions {
 ///
 /// This is the main entry point called from CLI.
 pub fn start_daemon(options: &DaemonOptions, config: &Config) -> Result<()> {
+    validate_configured_roots(config)?;
     let mut daemon = Daemon::new(config.clone(), options.clone());
 
     if options.foreground {
@@ -1243,24 +1253,60 @@ pub fn show_status(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Detect available drives and show their types.
-pub fn detect_drives() {
-    println!("{}", "Detected Drives".bold());
-    println!();
+/// Detect available drives on Windows or show configured index roots and accessibility on Unix.
+pub fn detect_drives(config: &Config) {
+    #[cfg(windows)]
+    {
+        let _ = config;
+        println!("{}", "Detected Drives".bold());
+        println!();
 
-    let volumes = detect_ntfs_volumes();
-    if volumes.is_empty() {
-        println!("  No NTFS volumes detected");
-    } else {
-        println!("  NTFS volumes (fast MFT scanning available):");
-        for letter in &volumes {
-            println!("    {letter}:\\");
+        let volumes = detect_ntfs_volumes();
+        if volumes.is_empty() {
+            println!("  No NTFS volumes detected");
+        } else {
+            println!("  NTFS volumes (fast MFT scanning available):");
+            for letter in &volumes {
+                println!("    {letter}:\\");
+            }
         }
+
+        println!();
+        print_cyan!("Run 'filefindd scan' to index all detected NTFS volumes");
+        print_cyan!("Run 'filefindd scan <path>' to scan a specific directory");
     }
 
-    println!();
-    print_cyan!("Run 'filefindd scan' to index all detected NTFS volumes");
-    print_cyan!("Run 'filefindd scan <path>' to scan a specific directory");
+    #[cfg(not(windows))]
+    {
+        let config_path = Config::expected_config_path();
+        println!("{}", "Configured Index Roots".bold());
+        println!("  Config: {}", config_path.display());
+        println!();
+
+        if config.daemon.paths.is_empty() {
+            println!("  No paths configured in [daemon].paths.");
+            println!();
+            println!("  Add explicit absolute directories to {}:", config_path.display());
+            println!("    [daemon]");
+            println!("    paths = [\"/Users/you/Documents\", \"/Volumes/Media\"]");
+        } else {
+            for root in &config.daemon.paths {
+                let path = Path::new(root);
+                let status = if !path.is_absolute() {
+                    "invalid (must be absolute)".red().to_string()
+                } else if path.is_dir() {
+                    "accessible".green().to_string()
+                } else {
+                    "inaccessible".yellow().to_string()
+                };
+                println!("  {root}  [{status}]");
+            }
+        }
+
+        println!();
+        print_cyan!("Run 'filefindd scan' to index all configured paths");
+        print_cyan!("Run 'filefindd scan <path>' to scan a specific directory");
+    }
 }
 
 /// Show index statistics.
@@ -3031,7 +3077,7 @@ mod tests {
     #[test]
     fn test_detect_drives_does_not_panic() {
         // Just verify it runs without panic (output depends on system)
-        detect_drives();
+        detect_drives(&Config::default());
     }
 
     // --- DaemonState / DaemonOptions edge cases ---

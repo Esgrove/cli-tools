@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -55,6 +55,9 @@ pub struct FileWatcher {
 
     /// A watcher error means changes may have been missed.
     rescan_needed: Arc<AtomicBool>,
+
+    /// Number of configured paths successfully registered with the OS watcher.
+    registered_watches: Arc<AtomicUsize>,
 }
 
 /// Entry from a directory scan.
@@ -103,6 +106,7 @@ impl FileWatcher {
             recursive,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -118,6 +122,7 @@ impl FileWatcher {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -189,8 +194,9 @@ impl FileWatcher {
         })
         .context("Failed to create file watcher")?;
 
-        // Add paths to watch
-        Self::watch_configured_paths(&mut watcher, &watched_paths, recursive);
+        // Add paths to watch and record how many actually registered.
+        let registered = Self::watch_configured_paths(&mut watcher, &watched_paths, recursive);
+        self.registered_watches.store(registered, Ordering::Release);
 
         // Spawn async task to process events with debouncing
         let process_shutdown = shutdown.clone();
@@ -232,24 +238,29 @@ impl FileWatcher {
         Ok((event_rx, shutdown))
     }
 
-    /// Register each configured path with the underlying `notify` watcher.
-    fn watch_configured_paths(watcher: &mut RecommendedWatcher, paths: &[PathBuf], recursive: bool) {
+    /// Register each configured path with the underlying `notify` watcher and return how many succeeded.
+    fn watch_configured_paths(watcher: &mut RecommendedWatcher, paths: &[PathBuf], recursive: bool) -> usize {
         let mode = if recursive {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
         };
 
+        let mut registered = 0usize;
         for path in paths {
             if path.exists() {
                 match watcher.watch(path, mode) {
-                    Ok(()) => info!("Watching path: {}", path.display()),
+                    Ok(()) => {
+                        info!("Watching path: {}", path.display());
+                        registered += 1;
+                    }
                     Err(error) => warn!("Failed to watch path {}: {}", path.display(), error),
                 }
             } else {
                 Self::log_inaccessible_path(path);
             }
         }
+        registered
     }
 
     /// Log a descriptive warning for a path that could not be watched.
@@ -316,6 +327,12 @@ impl FileWatcher {
         self.rescan_needed.swap(false, Ordering::AcqRel)
     }
 
+    /// Return the number of configured paths successfully registered with the OS watcher.
+    #[must_use]
+    pub fn registered_watch_count(&self) -> usize {
+        self.registered_watches.load(Ordering::Acquire)
+    }
+
     /// Get the paths being watched.
     #[must_use]
     pub fn watched_paths(&self) -> &[PathBuf] {
@@ -340,6 +357,7 @@ impl Default for FileWatcher {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -459,8 +477,9 @@ async fn scan_directory_with_scope_and_concurrency(
     }
 
     if failed_directories > 0 {
-        anyhow::bail!(
-            "{failed_directories} directories could not be scanned under {}",
+        warn!(
+            "Skipped {} unreadable subdirectories under {}; remaining readable entries were indexed",
+            failed_directories,
             root.display()
         );
     }
@@ -611,6 +630,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         assert!(watcher.should_exclude(Path::new("test.tmp")));
@@ -630,6 +650,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         // Should match - ends with .bak
@@ -653,6 +674,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         // Should match - contains "cache"
@@ -678,6 +700,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         assert!(watcher.should_exclude(Path::new("Thumbs.db")));
@@ -700,6 +723,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         // With no patterns, nothing should be excluded
@@ -718,6 +742,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         // Each pattern can independently match
@@ -1051,6 +1076,7 @@ mod tests {
             recursive: true,
             shutdown: Arc::new(AtomicBool::new(false)),
             rescan_needed: Arc::new(AtomicBool::new(false)),
+            registered_watches: Arc::new(AtomicUsize::new(0)),
         };
 
         assert!(watcher.should_exclude(Path::new("file.TMP")));
@@ -1261,5 +1287,36 @@ mod test_watcher_renames {
                 "{from} -> {to} was not reported as a rename: {described:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod test_unreadable_child_directory {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn unreadable_subdirectory_does_not_discard_readable_siblings() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let blocked = root.join("blocked");
+        let readable = root.join("readable");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::create_dir_all(&readable).unwrap();
+        fs::write(blocked.join("secret.txt"), "secret").unwrap();
+        fs::write(readable.join("visible.txt"), "visible").unwrap();
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = scan_directory(&root, &[]).await;
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let entries = result.expect("unreadable child directory should not fail entire root scan");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert!(names.contains(&"visible.txt"), "{names:?}");
     }
 }

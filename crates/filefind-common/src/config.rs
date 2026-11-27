@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde::Deserialize;
 use tracing::warn;
@@ -239,30 +240,61 @@ impl UserConfig {
         Self::load_from_path(CONFIG_PATH.as_deref())
     }
 
+    /// Load configuration strictly from `FILEFIND_CONFIG` or `~/.config/filefind.toml`.
+    ///
+    /// Returns default configuration when the config file does not exist,
+    /// and returns an error when an existing config file cannot be read or contains malformed TOML.
+    ///
+    /// # Errors
+    /// Returns an error if an existing configuration file cannot be read or parsed.
+    pub fn load_strict() -> Result<Self> {
+        let resolved = resolve_config_path(std::env::var_os(CONFIG_PATH_ENV), dirs::home_dir());
+        Self::load_from_path_strict(resolved.as_deref())
+    }
+
     /// Load configuration from a specific path.
     ///
     /// Returns default configuration if the file doesn't exist or can't be parsed.
     #[must_use]
     pub fn load_from_path(path: Option<&std::path::Path>) -> Self {
-        let Some(path) = path else {
-            return Self::default();
-        };
-
-        let config_string = match fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(error) => {
-                warn!("Failed to read config file {}: {error}", path.display());
-                return Self::default();
-            }
-        };
-
-        match toml::from_str(&config_string) {
+        match Self::load_from_path_strict(path) {
             Ok(config) => config,
             Err(error) => {
-                warn!("Failed to parse config file {}: {error}", path.display());
+                warn!("{error:#}");
                 Self::default()
             }
         }
+    }
+
+    /// Load configuration strictly from a specific path.
+    ///
+    /// Returns default configuration when `path` is `None` or does not exist.
+    ///
+    /// # Errors
+    /// Returns an error if the file exists but cannot be read or parsed as valid TOML.
+    pub fn load_from_path_strict(path: Option<&std::path::Path>) -> Result<Self> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let config_string =
+            fs::read_to_string(path).with_context(|| format!("Failed to read config file {}", path.display()))?;
+        toml::from_str(&config_string).with_context(|| format!("Failed to parse config file {}", path.display()))
+    }
+
+    /// Return the configuration file path that filefind expects to read, even if it does not exist yet.
+    #[must_use]
+    pub fn expected_config_path() -> PathBuf {
+        if let Some(override_path) = std::env::var_os(CONFIG_PATH_ENV).filter(|value| !value.is_empty()) {
+            return PathBuf::from(override_path);
+        }
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(".config")
+            .join(format!("{PROJECT_NAME}.toml"))
     }
 
     /// Get the database path from `FILEFIND_DB`, the configured path, or the default, in that order.
@@ -1087,5 +1119,25 @@ mod test_resolve_database_path {
     #[test]
     fn default_path_is_used_without_an_override_or_configured_path() {
         assert_eq!(resolve_database_path(None, None), *DATABASE_PATH);
+    }
+}
+
+#[cfg(test)]
+mod test_strict_config_loading {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn missing_config_returns_default_while_malformed_toml_returns_error() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing.toml");
+        let default_config = UserConfig::load_from_path_strict(Some(&missing)).unwrap();
+        assert_eq!(default_config.daemon.paths, Vec::<String>::new());
+
+        let broken = temp.path().join("broken.toml");
+        fs::write(&broken, "[daemon\npaths = [").unwrap();
+        let error = UserConfig::load_from_path_strict(Some(&broken)).unwrap_err();
+        assert!(error.to_string().contains("broken.toml"), "{error:#}");
     }
 }
