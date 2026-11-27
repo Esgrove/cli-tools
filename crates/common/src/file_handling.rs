@@ -5,6 +5,7 @@
 //! destination reservations for detecting collisions within one batch,
 //! atomic file writes, and a recursive directory copy that refuses to copy a directory into itself.
 //! Cross device moves can report their copy progress through [`CopyProgress`].
+//! Completed moves and removals can be recorded as [`PathChange`] values for updating file indexes.
 
 use std::collections::HashSet;
 use std::fs;
@@ -13,8 +14,10 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{append_extension_to_path, into_nfc};
 
+mod path_change;
 mod progress_copy;
 
+pub use path_change::PathChange;
 pub use progress_copy::CopyProgress;
 
 /// What to do when a rename target already exists and is a different file.
