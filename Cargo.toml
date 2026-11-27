@@ -64,7 +64,7 @@ toml_edit = "0.25.21"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tray-icon = "0.26.1"
+tray-icon = "0.27.0"
 trash = "5.4.0"
 unicode-normalization = "0.1.26"
 unicode-segmentation = "1.13.3"
