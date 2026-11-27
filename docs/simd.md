@@ -93,8 +93,8 @@ The kernels now always run at the detected level.
 - The scanner shortcut has a test that scans every source, test fixture,
   and config file in the repository with and without the shortcut
   and requires identical results on every line.
-- `chunk_end` is tested against the old character loop on every start position of lines
-  with every Unicode whitespace kind, em and en dashes, curly quotes, and long words.
+- `chunk_end` is tested against the old character loop on every start position of the test lines.
+  The test lines cover every Unicode whitespace kind, em and en dashes, curly quotes, and long words.
 
 ## Process
 

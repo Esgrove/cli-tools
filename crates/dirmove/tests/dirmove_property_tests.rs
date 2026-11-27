@@ -1,10 +1,10 @@
 //! Property tests for the `dirmove` name normalization, highlighting, and prefix stripping.
 //!
 //! These check that `normalize_name` is idempotent
-//! and leaves no spaces, dots, or uppercase letters,
-//! that `NormalizedFilename::find_match` returns a range on
-//! character boundaries whose text normalizes to the searched name,
-//! and that stripping ignored prefixes only ever removes text from the start of a name.
+//! and leaves no spaces, dots, or uppercase letters.
+//! They check that `NormalizedFilename::find_match` returns a range on character boundaries,
+//! and that the text in that range normalizes to the searched name.
+//! Stripping ignored prefixes is checked to only ever remove text from the start of a name.
 //! Set `PROPTEST_CASES` to run more cases than the default.
 
 use cli_tools_dirmove::utils::normalize_name;

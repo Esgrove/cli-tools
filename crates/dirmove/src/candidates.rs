@@ -199,8 +199,8 @@ impl FilteredParts {
         false
     }
 
-    /// Check if there is a valid word boundary in `original_text` right after a lowercased prefix
-    /// of byte length `lowercase_prefix_len`.
+    /// Check if there is a valid word boundary in `original_text` right
+    /// after a lowercased prefix of byte length `lowercase_prefix_len`.
     ///
     /// Maps lowercased byte length back to the corresponding UTF-8 byte offset in `original_text`,
     /// handling case-expanding Unicode characters such as `'İ'` (2 bytes -> 3 bytes).

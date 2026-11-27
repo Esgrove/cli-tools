@@ -223,8 +223,8 @@ pub(super) fn split_tokens<'text>(
 
 /// Violations for original lines that exceed the width limits.
 ///
-/// `line_changed` tells whether the reflow changed each original line, so an unbreakable line
-/// that survives intact while a sibling line changes is still reported as non-fixable.
+/// `line_changed` tells whether the reflow changed each original line,
+/// so an unbreakable line that survives intact while a sibling line changes is still reported as non-fixable.
 pub(super) fn over_long_line_violations(
     paragraph: &Paragraph,
     options: &FormatOptions,

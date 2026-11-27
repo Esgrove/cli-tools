@@ -711,11 +711,11 @@ mod tests {
         data[8..16].copy_from_slice(&file_ref.to_le_bytes());
         // ParentFileReferenceNumber (16..24)
         data[16..24].copy_from_slice(&parent_ref.to_le_bytes());
-        // Usn (24..32) — leave as zero for MFT
-        // TimeStamp (32..40) — zero
-        // Reason (40..44) — zero
-        // SourceInfo (44..48) — zero
-        // SecurityId (48..52) — zero
+        // Usn (24..32): left as zero for MFT
+        // TimeStamp (32..40): zero
+        // Reason (40..44): zero
+        // SourceInfo (44..48): zero
+        // SecurityId (48..52): zero
         // FileAttributes (52..56)
         data[52..56].copy_from_slice(&attributes.to_le_bytes());
         // FileNameLength (56..58)
@@ -748,15 +748,15 @@ mod tests {
         data[6..8].copy_from_slice(&0u16.to_le_bytes());
         // FileReferenceNumber lower 64 bits (8..16)
         data[8..16].copy_from_slice(&file_ref.to_le_bytes());
-        // FileReferenceNumber upper 64 bits (16..24) — zero
+        // FileReferenceNumber upper 64 bits (16..24): zero
         // ParentFileReferenceNumber lower 64 bits (24..32)
         data[24..32].copy_from_slice(&parent_ref.to_le_bytes());
-        // ParentFileReferenceNumber upper 64 bits (32..40) — zero
-        // Usn (40..48) — zero
-        // TimeStamp (48..56) — zero
-        // Reason (56..60) — zero
-        // SourceInfo (60..64) — zero
-        // SecurityId (64..68) — zero
+        // ParentFileReferenceNumber upper 64 bits (32..40): zero
+        // Usn (40..48): zero
+        // TimeStamp (48..56): zero
+        // Reason (56..60): zero
+        // SourceInfo (60..64): zero
+        // SecurityId (64..68): zero
         // FileAttributes (68..72)
         data[68..72].copy_from_slice(&attributes.to_le_bytes());
         // FileNameLength (72..74)

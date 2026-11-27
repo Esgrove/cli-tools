@@ -358,8 +358,9 @@ fn output_differs(output: &[(OutputContent, HardBreak)], paragraph: &Paragraph) 
 
 /// For each original line, return whether the reflow actually modified or broke it.
 ///
-/// An original line whose exact text appears verbatim in `output` (for example an unbreakable URL
-/// on line 2 while line 1 was rewritten) did not change and must not be marked fixable.
+/// An original line whose exact text appears verbatim in `output`
+/// (for example an unbreakable URL on line 2 while line 1 was rewritten)
+/// did not change and must not be marked fixable.
 fn per_line_changed(output: &[(OutputContent<'_>, HardBreak)], paragraph: &Paragraph, changed: bool) -> Vec<bool> {
     if !changed {
         return vec![false; paragraph.lines.len()];
