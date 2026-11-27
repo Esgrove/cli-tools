@@ -340,7 +340,7 @@ pub(crate) fn move_symlink_via_temp(source: &Path, destination: &Path) -> anyhow
 /// Check if `path` is a symbolic link that Windows created as a directory link.
 ///
 /// Unix links have no kind, so this is always false there.
-fn is_directory_symlink(path: &Path) -> bool {
+const fn is_directory_symlink(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileTypeExt;
