@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use cli_tools_common::test_support::TempTree;
+use filefind_common::test_support::IndexFixture;
 
 /// Run the CLI with a fake probe and no user configuration.
 fn run(tree: &TempTree, input: &Path) -> Output {
@@ -28,6 +29,8 @@ esac
         .env("HOME", tree.dir("home"))
         // Windows resolves the data directory from the known folder API and ignores HOME.
         .env("CLI_TOOLS_DB", tree.join("home/cli-tools.db"))
+        .env("FILEFIND_DB", tree.join("home/filefind.db"))
+        .env("FILEFIND_CONFIG", tree.join("home/filefind.toml"))
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("XDG_CONFIG_HOME")
         .output()
@@ -64,4 +67,20 @@ fn up_to_date_files_and_partially_successful_runs_succeed() {
     let output = run(&tree, &tree.join("videos"));
     assert!(output.status.success(), "{output:?}");
     assert!(tree.exists("videos/good.1080p.mp4"));
+}
+
+#[test]
+fn renames_move_the_entries_of_an_existing_filefind_index() {
+    let tree = TempTree::with_entries(&["videos/movie.mp4", "videos/other.mp4", "home/"]);
+    let index = IndexFixture::create(
+        &tree.join("home/filefind.db"),
+        &tree.join("videos"),
+        &[tree.join("videos/movie.mp4")],
+    );
+
+    let output = run(&tree, &tree.join("videos"));
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(tree.exists("videos/other.1080p.mp4"));
+    assert_eq!(index.indexed_paths(), vec!["movie.1080p.mp4"]);
 }

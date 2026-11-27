@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use cli_tools_common::file_handling::TargetReservations;
-use cli_tools_common::{print_bold, print_green, print_yellow};
+use cli_tools_common::{PathChange, print_bold, print_green, print_yellow};
 use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_media::Resolution;
 use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
@@ -34,6 +34,8 @@ const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {
 struct OperationCounts {
     succeeded: usize,
     failed: usize,
+    /// Completed renames and deletions, for updating file indexes afterwards.
+    changes: Vec<PathChange>,
 }
 
 /// Result of probing one cache-miss file in parallel.
@@ -75,6 +77,11 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
         None => (results, OperationCounts::default()),
     };
     let renames = add_resolution_labels(config, remaining, cache.as_mut(), lock_store.as_ref());
+
+    let changes: Vec<PathChange> = deletions.changes.iter().chain(&renames.changes).cloned().collect();
+    for warning in filefind_common::update_default_index(&changes) {
+        print_yellow!("Could not update the filefind index: {warning}");
+    }
 
     anyhow::ensure!(
         probe_failures + deletions.failed + renames.failed == 0 || deletions.succeeded + renames.succeeded > 0,
@@ -158,10 +165,11 @@ fn add_resolution_labels(
         match result.rename(&new_path, config.overwrite, config.dryrun) {
             Ok(()) => {
                 counts.succeeded += 1;
-                if !config.dryrun
-                    && let Some(scan_cache) = cache.as_deref_mut()
-                {
-                    let _ = scan_cache.move_cached_path(&result.file, &new_path);
+                if !config.dryrun {
+                    counts.changes.push(PathChange::moved_file(&result.file, &new_path));
+                    if let Some(scan_cache) = cache.as_deref_mut() {
+                        let _ = scan_cache.move_cached_path(&result.file, &new_path);
+                    }
                 }
             }
             Err(error) => {
@@ -230,10 +238,11 @@ fn delete_low_resolution_files(
             match result.delete(config.dryrun) {
                 Ok(()) => {
                     counts.succeeded += 1;
-                    if !config.dryrun
-                        && let Some(scan_cache) = cache.as_deref_mut()
-                    {
-                        let _ = scan_cache.remove_cached_path(&result.file);
+                    if !config.dryrun {
+                        counts.changes.push(PathChange::removed_file(&result.file));
+                        if let Some(scan_cache) = cache.as_deref_mut() {
+                            let _ = scan_cache.remove_cached_path(&result.file);
+                        }
                     }
                 }
                 Err(error) => {
@@ -1143,6 +1152,16 @@ mod test_delete_low_resolution_files {
     }
 
     #[test]
+    fn a_dryrun_deletion_reports_no_changes() {
+        let results = vec![result("small.mp4", 640, 480)];
+
+        let (_, deletions) = delete_low_resolution_files(results, 720, &config(true), None, None);
+
+        assert_eq!(deletions.succeeded, 1);
+        assert_eq!(deletions.changes, Vec::new());
+    }
+
+    #[test]
     fn an_empty_list_stays_empty() {
         let (remaining, _) = delete_low_resolution_files(Vec::new(), 720, &config(false), None, None);
 
@@ -1426,6 +1445,34 @@ mod test_add_resolution_labels_in_trees {
                 "movie.1080p.mp4: top",
             ]
         );
+    }
+
+    #[test]
+    fn renamed_files_are_reported_as_moves() {
+        let tree = TempTree::new();
+        tree.file_with("a/movie.mp4", "one");
+        let files = results(&tree, &["a/movie.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, false, false), files, None, None);
+
+        assert_eq!(
+            renamed.changes,
+            vec![PathChange::moved_file(
+                tree.join("a/movie.mp4"),
+                tree.join("a/movie.1080p.mp4")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dryrun_reports_no_changes() {
+        let tree = TempTree::new();
+        tree.file_with("a/movie.mp4", "one");
+        let files = results(&tree, &["a/movie.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, true, false), files, None, None);
+
+        assert_eq!(renamed.changes, Vec::new());
     }
 
     #[test]

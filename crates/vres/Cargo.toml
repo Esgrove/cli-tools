@@ -21,6 +21,7 @@ cli-tools-dots = { workspace = true }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
 colored = { workspace = true }
 dunce = { workspace = true }
+filefind-common = { workspace = true }
 indicatif = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
@@ -32,6 +33,7 @@ cli-tools-db = { workspace = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }
+filefind-common = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]

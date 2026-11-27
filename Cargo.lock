@@ -818,6 +818,7 @@ dependencies = [
  "cli-tools-media",
  "colored",
  "dunce",
+ "filefind-common",
  "indicatif",
  "rayon",
  "regex",
