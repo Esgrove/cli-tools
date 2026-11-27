@@ -60,6 +60,7 @@ jiff = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 
 [dev-dependencies]
+filefind-common = { workspace = true, features = ["test-support"] }
 toml = { workspace = true }
 
 [[test]]

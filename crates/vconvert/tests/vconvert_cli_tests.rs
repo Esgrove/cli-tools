@@ -417,3 +417,48 @@ exec /bin/sleep 15
     assert!(!original.exists(), "pending conversion was not retried");
     assert_eq!(fs::read_to_string(final_output).unwrap(), "hevc converted video data\n");
 }
+
+#[test]
+fn partial_success_flushes_filefind_index_changes_and_dryrun_leaves_index_unchanged() {
+    use filefind_common::test_support::IndexFixture;
+
+    let sandbox = Sandbox::new(
+        r#"#!/bin/sh
+for argument; do last=$argument; done
+case "$*" in
+    *broken.mkv*) exit 1;;
+esac
+printf 'hevc converted video data\n' > "$last"
+"#,
+    );
+    let already_hevc = sandbox.videos().join("Clip.mp4");
+    let to_convert = sandbox.videos().join("alpha.mkv");
+    let broken = sandbox.videos().join("broken.mkv");
+    fs::write(&already_hevc, b"hevc already encoded stream\n").unwrap();
+    fs::write(&to_convert, b"h264 source and plenty of video data to compress").unwrap();
+    fs::write(&broken, b"h264 broken source and plenty of video data to compress").unwrap();
+
+    let index = IndexFixture::create(
+        &sandbox.root.path().join("home/filefind.db"),
+        sandbox.root.path(),
+        &[already_hevc, to_convert.clone(), broken.clone()],
+    );
+
+    // Dry-run must not alter the seeded index.
+    let dryrun = sandbox.run(&["--all", "--print", "--delete"]);
+    assert!(dryrun.status.success());
+    assert_eq!(
+        index.indexed_paths(),
+        vec!["videos/Clip.mp4", "videos/alpha.mkv", "videos/broken.mkv"]
+    );
+
+    // Real run: Clip.mp4 is renamed to Clip.x265.mp4, alpha.mkv is converted and deleted, broken.mkv fails.
+    let output = sandbox.run(&["--all", "--delete"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(sandbox.videos().join("Clip.x265.mp4").exists());
+    assert!(!to_convert.exists());
+    assert!(sandbox.videos().join("alpha.x265.mp4").exists());
+    assert!(broken.exists());
+    assert!(!sandbox.videos().join("broken.x265.mp4").exists());
+    assert_eq!(index.indexed_paths(), vec!["videos/Clip.x265.mp4", "videos/broken.mkv"]);
+}
