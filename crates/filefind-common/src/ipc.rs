@@ -19,6 +19,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Environment variable naming an explicit IPC socket/pipe path.
+pub const IPC_SOCKET_ENV: &str = "FILEFIND_IPC_PATH";
+
 /// Default timeout for IPC operations.
 pub const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -30,16 +33,16 @@ const MAX_MESSAGE_SIZE: usize = 1024;
 
 /// Path to the IPC socket/pipe.
 static IPC_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    if let Some(override_path) = std::env::var_os(IPC_SOCKET_ENV).filter(|value| !value.is_empty()) {
+        return PathBuf::from(override_path);
+    }
     #[cfg(windows)]
     {
         PathBuf::from(format!(r"\\.\pipe\{IPC_PIPE_NAME}"))
     }
     #[cfg(not(windows))]
     {
-        let runtime_dir = dirs::runtime_dir()
-            .or_else(dirs::cache_dir)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        runtime_dir.join(format!("{IPC_PIPE_NAME}.sock"))
+        default_unix_socket_path()
     }
 });
 
@@ -421,6 +424,18 @@ impl Default for IpcClient {
 #[must_use]
 pub fn get_ipc_path() -> &'static PathBuf {
     &IPC_PATH
+}
+
+/// Resolve a private per-user Unix domain socket path without falling back to a shared fixed `/tmp` socket.
+#[cfg(not(windows))]
+fn default_unix_socket_path() -> PathBuf {
+    let base_dir = dirs::runtime_dir().or_else(dirs::cache_dir).unwrap_or_else(|| {
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| format!("pid-{}", std::process::id()));
+        std::env::temp_dir().join(format!("filefind-{user}"))
+    });
+    base_dir.join("filefind").join(format!("{IPC_PIPE_NAME}.sock"))
 }
 
 /// Write a length-prefixed message to a writer.
@@ -945,10 +960,9 @@ mod tests {
 
     #[test]
     fn test_ipc_client_is_daemon_running_when_not_running() {
-        // When daemon is not running, this should return false
-        let client = IpcClient::new();
-        // This test just verifies the method exists and doesn't panic
-        let _result = client.is_daemon_running();
+        let temp = tempfile::tempdir().unwrap();
+        let client = IpcClient::new().with_pipe_path(temp.path().join("absent-daemon.sock"));
+        assert!(!client.is_daemon_running());
     }
 
     #[test]

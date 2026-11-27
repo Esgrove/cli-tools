@@ -11,7 +11,11 @@
 #[cfg(windows)]
 use std::ffi::OsStr;
 #[cfg(not(windows))]
-use std::os::unix::net::UnixListener;
+use std::fs::{DirBuilder, File, OpenOptions, Permissions};
+#[cfg(not(windows))]
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
+#[cfg(not(windows))]
+use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -20,9 +24,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 #[cfg(windows)]
@@ -207,20 +212,21 @@ impl IpcServer {
         self.pipe_path.as_deref().unwrap_or_else(|| get_ipc_path().as_path())
     }
 
-    /// Start the IPC server.
+    /// Start the IPC server and report startup readiness or bind failure on `ready_sender`.
     ///
-    /// This runs in a separate task and handles incoming client connections.
-    pub fn run_blocking(&self) {
+    /// This runs in a dedicated thread and handles incoming client connections.
+    pub fn run_blocking_with_ready(&self, ready_sender: &SyncSender<Result<()>>) {
         info!("Starting IPC server");
 
         #[cfg(windows)]
         {
+            let _ = ready_sender.send(Ok(()));
             self.run_windows_blocking();
         }
 
         #[cfg(not(windows))]
         {
-            self.run_unix_blocking();
+            self.run_unix_blocking(ready_sender);
         }
     }
 
@@ -399,37 +405,33 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Run the IPC server on Unix using domain sockets (blocking version).
+    /// Run the IPC server on Unix using domain sockets with exclusive lifetime ownership.
     #[cfg(not(windows))]
-    fn run_unix_blocking(&self) {
+    fn run_unix_blocking(&self, ready_sender: &SyncSender<Result<()>>) {
         let socket_path = self.effective_pipe_path();
-
-        // Remove existing socket file if it exists
-        let _ = std::fs::remove_file(socket_path);
-
-        // Create the socket directory if needed
-        if let Some(parent) = socket_path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            error!("Failed to create socket directory: {}", error);
-            return;
-        }
-
-        let listener = match UnixListener::bind(socket_path) {
-            Ok(listener) => listener,
+        let (listener, _lock_guard) = match bind_exclusive_unix_socket(socket_path) {
+            Ok(bound) => bound,
             Err(error) => {
-                error!("Failed to bind Unix socket: {}", error);
+                error!(
+                    "Failed to initialize Unix IPC socket {}: {error:#}",
+                    socket_path.display()
+                );
+                let _ = ready_sender.send(Err(error));
                 return;
             }
         };
 
-        // Set non-blocking to allow periodic shutdown checks
         if let Err(error) = listener.set_nonblocking(true) {
-            error!("Failed to set non-blocking: {}", error);
+            error!("Failed to set non-blocking on IPC listener: {error}");
+            let _ = std::fs::remove_file(socket_path);
+            let _ = ready_sender.send(Err(
+                anyhow::Error::new(error).context("Failed to configure IPC listener")
+            ));
             return;
         }
 
         info!("IPC server listening on: {}", socket_path.display());
+        let _ = ready_sender.send(Ok(()));
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -447,7 +449,7 @@ impl IpcServer {
                 }
                 Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     // No connection available, sleep briefly and try again
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Err(error) => {
                     warn!("Failed to accept connection: {}", error);
@@ -455,15 +457,18 @@ impl IpcServer {
             }
         }
 
-        // Clean up socket file
+        // Drop the listener and unlink our owned socket before releasing the lock file.
+        drop(listener);
         let _ = std::fs::remove_file(socket_path);
     }
 
-    /// Handle a Unix domain socket client synchronously.
+    /// Handle a Unix domain socket client synchronously with bounded read and write timeouts.
     #[cfg(not(windows))]
-    fn handle_unix_client_sync(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
-        // Set blocking for this connection
+    fn handle_unix_client_sync(&self, stream: &UnixStream) -> Result<()> {
         stream.set_nonblocking(false)?;
+        let timeout = Some(filefind_common::ipc::IPC_TIMEOUT);
+        stream.set_read_timeout(timeout)?;
+        stream.set_write_timeout(timeout)?;
 
         // Read the command using binary protocol
         let mut reader = stream;
@@ -543,23 +548,27 @@ impl IpcServer {
     }
 }
 
-/// Spawn the IPC server as a background thread.
+/// Spawn the IPC server as a background thread and wait until its endpoint is bound.
 ///
-/// Returns a channel receiver for commands from clients.
-pub fn spawn_ipc_server(state: Arc<IpcServerState>, shutdown: Arc<AtomicBool>) -> mpsc::Receiver<IpcToDaemon> {
+/// # Errors
+/// Returns an error if the IPC endpoint cannot be acquired (for example when another daemon is already running).
+pub fn spawn_ipc_server(state: Arc<IpcServerState>, shutdown: Arc<AtomicBool>) -> Result<mpsc::Receiver<IpcToDaemon>> {
     spawn_ipc_server_with_path(state, shutdown, None)
 }
 
-/// Spawn the IPC server as a background thread with an optional custom pipe path.
+/// Spawn the IPC server as a background thread with an optional custom pipe path and wait for readiness.
 ///
 /// When `pipe_path` is `None`, the server listens on the default path.
-/// Returns a channel receiver for commands from clients.
+///
+/// # Errors
+/// Returns an error if the IPC endpoint cannot be bound or owned exclusively.
 pub fn spawn_ipc_server_with_path(
     state: Arc<IpcServerState>,
     shutdown: Arc<AtomicBool>,
     pipe_path: Option<PathBuf>,
-) -> mpsc::Receiver<IpcToDaemon> {
+) -> Result<mpsc::Receiver<IpcToDaemon>> {
     let (command_sender, command_receiver) = mpsc::channel(32);
+    let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
 
     let mut server = IpcServer::new(state, command_sender, shutdown);
     if let Some(path) = pipe_path {
@@ -569,11 +578,86 @@ pub fn spawn_ipc_server_with_path(
     std::thread::Builder::new()
         .name("ipc-server".to_string())
         .spawn(move || {
-            server.run_blocking();
+            server.run_blocking_with_ready(&ready_sender);
         })
-        .expect("Failed to spawn IPC server thread");
+        .context("Failed to spawn IPC server thread")?;
 
-    command_receiver
+    ready_receiver
+        .recv()
+        .context("IPC server thread exited before reporting readiness")??;
+
+    Ok(command_receiver)
+}
+
+/// Acquire an exclusive lifetime lock, recover only a stale socket, and bind `socket_path` with `0600` permissions.
+#[cfg(not(windows))]
+fn bind_exclusive_unix_socket(socket_path: &Path) -> Result<(UnixListener, File)> {
+    if let Some(parent) = socket_path.parent()
+        && !parent.exists()
+    {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .with_context(|| format!("Failed to create private socket directory {}", parent.display()))?;
+    }
+
+    let lock_path = socket_lock_path(socket_path);
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open daemon lock file {}", lock_path.display()))?;
+
+    match lock_file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!(
+                "Another filefindd instance already owns the control socket {}",
+                socket_path.display()
+            );
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(
+                anyhow::Error::new(error).context(format!("Failed to lock daemon lock file {}", lock_path.display()))
+            );
+        }
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(socket_path) {
+        if !metadata.file_type().is_socket() {
+            anyhow::bail!(
+                "Refusing to overwrite non-socket file at IPC path {}",
+                socket_path.display()
+            );
+        }
+        if UnixStream::connect(socket_path).is_ok() {
+            anyhow::bail!(
+                "Another daemon is already listening on IPC socket {}",
+                socket_path.display()
+            );
+        }
+        std::fs::remove_file(socket_path)
+            .with_context(|| format!("Failed to remove stale IPC socket {}", socket_path.display()))?;
+    }
+
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("Failed to bind Unix IPC socket {}", socket_path.display()))?;
+    std::fs::set_permissions(socket_path, Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to restrict permissions on IPC socket {}", socket_path.display()))?;
+
+    Ok((listener, lock_file))
+}
+
+/// Derive the adjacent exclusive lock file path for a Unix domain socket.
+#[cfg(not(windows))]
+fn socket_lock_path(socket_path: &Path) -> PathBuf {
+    let mut lock_name = socket_path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    PathBuf::from(lock_name)
 }
 
 #[cfg(test)]
@@ -1435,10 +1519,8 @@ mod tests {
         let state = Arc::new(IpcServerState::new());
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let receiver = spawn_ipc_server_with_path(Arc::clone(&state), Arc::clone(&shutdown), Some(pipe_path.clone()));
-
-        // Give the server thread a moment to start listening.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let receiver = spawn_ipc_server_with_path(Arc::clone(&state), Arc::clone(&shutdown), Some(pipe_path.clone()))
+            .expect("IPC server should bind");
 
         (pipe_path, state, shutdown, receiver)
     }
@@ -1884,5 +1966,144 @@ mod tests {
         assert_eq!(status.monitored_volumes, 26);
 
         stop_test_server(&shutdown, &pipe_path);
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(windows))]
+mod test_unix_socket_ownership {
+    use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::{Duration, Instant};
+
+    use filefind_common::IpcClient;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn wait_for_socket_removed(socket_path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while socket_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn duplicate_start_cannot_displace_live_daemon_and_permissions_are_private() {
+        let temp = tempdir().unwrap();
+        let private_dir = temp.path().join("private");
+        let socket_path = private_dir.join("daemon.sock");
+
+        let state_first = Arc::new(IpcServerState::new());
+        state_first.state.store(DaemonStateInfo::Running);
+        state_first.indexed_files.store(42, Ordering::Relaxed);
+        let shutdown_first = Arc::new(AtomicBool::new(false));
+        let _receiver_first = spawn_ipc_server_with_path(
+            Arc::clone(&state_first),
+            Arc::clone(&shutdown_first),
+            Some(socket_path.clone()),
+        )
+        .unwrap();
+
+        let dir_mode = fs::metadata(&private_dir).unwrap().permissions().mode() & 0o777;
+        let sock_mode = fs::symlink_metadata(&socket_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(sock_mode, 0o600);
+
+        // Second start must fail immediately and leave the first daemon reachable.
+        let state_second = Arc::new(IpcServerState::new());
+        let shutdown_second = Arc::new(AtomicBool::new(false));
+        let duplicate = spawn_ipc_server_with_path(
+            Arc::clone(&state_second),
+            Arc::clone(&shutdown_second),
+            Some(socket_path.clone()),
+        );
+        assert!(duplicate.is_err());
+
+        let client = IpcClient::new().with_pipe_path(socket_path.clone());
+        let status = client.get_status().unwrap();
+        assert_eq!(status.indexed_files, 42);
+
+        // Clean stop removes the owned socket and allows a clean restart.
+        shutdown_first.store(true, Ordering::Relaxed);
+        wait_for_socket_removed(&socket_path);
+        assert!(fs::symlink_metadata(&socket_path).is_err());
+
+        let state_third = Arc::new(IpcServerState::new());
+        state_third.state.store(DaemonStateInfo::Running);
+        state_third.indexed_files.store(99, Ordering::Relaxed);
+        let shutdown_third = Arc::new(AtomicBool::new(false));
+        let _receiver_third = spawn_ipc_server_with_path(
+            Arc::clone(&state_third),
+            Arc::clone(&shutdown_third),
+            Some(socket_path.clone()),
+        )
+        .unwrap();
+        assert_eq!(client.get_status().unwrap().indexed_files, 99);
+
+        shutdown_third.store(true, Ordering::Relaxed);
+        wait_for_socket_removed(&socket_path);
+    }
+
+    #[test]
+    fn recovers_stale_socket_and_preserves_regular_file_sentinel() {
+        let temp = tempdir().unwrap();
+
+        // Regular-file sentinel must never be unlinked.
+        let sentinel_path = temp.path().join("sentinel.sock");
+        fs::write(&sentinel_path, "do not delete").unwrap();
+        let sentinel_result = spawn_ipc_server_with_path(
+            Arc::new(IpcServerState::new()),
+            Arc::new(AtomicBool::new(false)),
+            Some(sentinel_path.clone()),
+        );
+        assert!(sentinel_result.is_err());
+        assert_eq!(fs::read_to_string(&sentinel_path).unwrap(), "do not delete");
+
+        // Stale socket left behind by a dead listener is recovered cleanly.
+        let stale_path = temp.path().join("stale.sock");
+        let stale_listener = UnixListener::bind(&stale_path).unwrap();
+        drop(stale_listener);
+        assert!(fs::symlink_metadata(&stale_path).is_ok());
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let _receiver = spawn_ipc_server_with_path(
+            Arc::new(IpcServerState::new()),
+            Arc::clone(&shutdown),
+            Some(stale_path.clone()),
+        )
+        .unwrap();
+        let client = IpcClient::new().with_pipe_path(stale_path.clone());
+        assert!(client.is_daemon_running());
+
+        shutdown.store(true, Ordering::Relaxed);
+        wait_for_socket_removed(&stale_path);
+    }
+
+    #[test]
+    fn stalled_incomplete_client_does_not_block_subsequent_requests() {
+        let temp = tempdir().unwrap();
+        let socket_path = temp.path().join("bounded.sock");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let _receiver = spawn_ipc_server_with_path(
+            Arc::new(IpcServerState::new()),
+            Arc::clone(&shutdown),
+            Some(socket_path.clone()),
+        )
+        .unwrap();
+
+        // Connect and send only 1 byte of the 2-byte length prefix without closing.
+        let mut stalled = UnixStream::connect(&socket_path).unwrap();
+        stalled.write_all(&[0x01]).unwrap();
+
+        // A subsequent real client succeeds once the server's bounded read timeout expires.
+        let client = IpcClient::with_timeout(Duration::from_secs(5)).with_pipe_path(socket_path.clone());
+        assert!(client.is_daemon_running());
+
+        drop(stalled);
+        shutdown.store(true, Ordering::Relaxed);
+        wait_for_socket_removed(&socket_path);
     }
 }

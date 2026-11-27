@@ -203,8 +203,8 @@ impl Daemon {
         self.ipc_state.state.store(DaemonStateInfo::Starting);
         self.shutdown.store(false, Ordering::Relaxed);
 
-        // Start IPC server
-        let ipc_receiver = spawn_ipc_server(Arc::clone(&self.ipc_state), Arc::clone(&self.shutdown));
+        // Start IPC server and fail immediately if another instance owns the control endpoint.
+        let ipc_receiver = spawn_ipc_server(Arc::clone(&self.ipc_state), Arc::clone(&self.shutdown))?;
         self.ipc_receiver = Some(ipc_receiver);
 
         // Initialize database
@@ -1273,6 +1273,11 @@ pub fn start_daemon(options: &DaemonOptions, config: &Config) -> Result<()> {
 /// - **Windows**: Uses `DETACHED_PROCESS` and `CREATE_NO_WINDOW` creation flags
 /// - **Unix**: Uses a new process group with detached standard streams
 fn spawn_background_daemon(rescan: bool) -> Result<()> {
+    let client = IpcClient::new();
+    if client.is_daemon_running() {
+        anyhow::bail!("Daemon is already running");
+    }
+
     let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
     // Run in foreground mode in the detached process
@@ -1301,9 +1306,22 @@ fn spawn_background_daemon(rescan: bool) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    let child = command.spawn().context("Failed to spawn background daemon process")?;
+    let mut child = command.spawn().context("Failed to spawn background daemon process")?;
+    let pid = child.id();
 
-    print_green!("Daemon started in background (PID: {})", child.id());
+    // Poll briefly so immediate startup failures (such as a bind conflict) surface to the caller.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if client.is_daemon_running() {
+            break;
+        }
+        if let Some(status) = child.try_wait().context("Failed to check background daemon status")? {
+            anyhow::bail!("Background daemon exited immediately with status {status}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    print_green!("Daemon started in background (PID: {})", pid);
     print_cyan!("Use 'filefindd status' to check daemon status");
     print_cyan!("Use 'filefindd stop' to stop the daemon");
 
