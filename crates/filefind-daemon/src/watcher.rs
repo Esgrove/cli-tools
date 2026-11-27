@@ -1209,3 +1209,64 @@ mod tests {
         assert!(!matches_exclude_patterns("", &patterns));
     }
 }
+
+#[cfg(test)]
+mod test_watcher_renames {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Collect debounced changes until `expected` of them arrived or the deadline passed.
+    async fn collect_changes(receiver: &mut mpsc::Receiver<FileChangeEvent>, expected: usize) -> Vec<FileChangeEvent> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut changes = Vec::new();
+        while changes.len() < expected && Instant::now() < deadline {
+            if let Ok(Some(change)) = tokio::time::timeout(Duration::from_millis(200), receiver.recv()).await {
+                changes.push(change);
+            }
+        }
+        changes
+    }
+
+    #[tokio::test]
+    async fn native_rename_events_become_rename_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        std::fs::write(root.join("old.txt"), "contents").unwrap();
+        std::fs::create_dir(root.join("old dir")).unwrap();
+        std::fs::write(root.join("old dir").join("inside.txt"), "inside").unwrap();
+        let watcher = FileWatcher::new(vec![root.clone()], Vec::new(), 100, true);
+        let (mut receiver, _shutdown) = watcher.start().unwrap();
+        // Give the platform watcher a moment to arm before changing anything.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        std::fs::rename(root.join("old.txt"), root.join("new.txt")).unwrap();
+        std::fs::rename(root.join("old dir"), root.join("new dir")).unwrap();
+
+        let changes = collect_changes(&mut receiver, 2).await;
+        watcher.stop();
+        let described: Vec<String> = changes.iter().map(ToString::to_string).collect();
+        let renamed = |from: &str, to: &str| {
+            changes.iter().any(|change| {
+                matches!(change, FileChangeEvent::Renamed { from: old, to: new }
+                    if old == &root.join(from) && new == &root.join(to))
+            })
+        };
+        let created_and_deleted = |from: &str, to: &str| {
+            changes
+                .iter()
+                .any(|change| matches!(change, FileChangeEvent::Created(path) if path == &root.join(to)))
+                && changes
+                    .iter()
+                    .any(|change| matches!(change, FileChangeEvent::Deleted(path) if path == &root.join(from)))
+        };
+        // macOS reports both sides of a rename without saying which is which,
+        // so each side becomes a create or a delete there.
+        for (from, to) in [("old.txt", "new.txt"), ("old dir", "new dir")] {
+            assert!(
+                renamed(from, to) || (cfg!(target_os = "macos") && created_and_deleted(from, to)),
+                "{from} -> {to} was not reported as a rename: {described:?}"
+            );
+        }
+    }
+}
