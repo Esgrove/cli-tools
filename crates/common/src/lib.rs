@@ -253,6 +253,15 @@ pub fn collapse_repeated_separators(text: &str) -> String {
 }
 
 /// Format a number with comma thousands separators, for example 1234567 as "1,234,567".
+///
+/// # Examples
+///
+/// ```
+/// use cli_tools_common::format_number;
+///
+/// assert_eq!(format_number(999), "999");
+/// assert_eq!(format_number(1_234_567), "1,234,567");
+/// ```
 #[must_use]
 pub fn format_number(number: u64) -> String {
     let digits = number.to_string();
@@ -1718,6 +1727,66 @@ mod format_size_tests {
         assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.00 TB");
         assert_eq!(format_size(2 * 1024 * 1024 * 1024 * 1024), "2.00 TB");
     }
+
+    #[test]
+    fn formats_bytes_below_one_kilobyte() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn formats_kilobytes() {
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(1536), "1.50 KB");
+        assert_eq!(format_size(2048), "2.00 KB");
+        assert_eq!(format_size(1024 * 1023), "1023.00 KB");
+    }
+
+    #[test]
+    fn formats_megabytes() {
+        assert_eq!(format_size(1_048_576), "1.00 MB");
+        assert_eq!(format_size(1_572_864), "1.50 MB");
+        assert_eq!(format_size(10_485_760), "10.00 MB");
+        assert_eq!(format_size(104_857_600), "100.00 MB");
+    }
+
+    #[test]
+    fn formats_gigabytes() {
+        assert_eq!(format_size(1_073_741_824), "1.00 GB");
+        assert_eq!(format_size(1_610_612_736), "1.50 GB");
+        assert_eq!(format_size(10_737_418_240), "10.00 GB");
+        assert_eq!(format_size(107_374_182_400), "100.00 GB");
+    }
+
+    #[test]
+    fn formats_terabytes() {
+        assert_eq!(format_size(1_099_511_627_776), "1.00 TB");
+        assert_eq!(format_size(1_649_267_441_664), "1.50 TB");
+        assert_eq!(format_size(10_995_116_277_760), "10.00 TB");
+    }
+
+    #[test]
+    fn formats_petabyte_range_values_as_terabytes() {
+        assert_eq!(format_size(1_125_899_906_842_624), "1024.00 TB");
+        assert_eq!(format_size(u64::MAX), "16777216.00 TB");
+    }
+
+    #[test]
+    fn formats_values_just_below_each_unit_boundary() {
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.00 KB");
+        assert_eq!(format_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 1024 - 1), "1024.00 GB");
+    }
+
+    #[test]
+    fn formats_two_decimal_places() {
+        assert_eq!(format_size(1536), "1.50 KB");
+        // 2047 / 1024 = 1.9990234375, which rounds to two decimals
+        assert_eq!(format_size(2047), "2.00 KB");
+    }
 }
 
 #[cfg(test)]
@@ -1742,6 +1811,41 @@ mod format_number_tests {
     #[test]
     fn formats_the_largest_value() {
         assert_eq!(format_number(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[test]
+    fn formats_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn formats_small_numbers_without_separators() {
+        assert_eq!(format_number(1), "1");
+        assert_eq!(format_number(12), "12");
+        assert_eq!(format_number(123), "123");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn formats_thousands() {
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1234), "1,234");
+        assert_eq!(format_number(12345), "12,345");
+        assert_eq!(format_number(123_456), "123,456");
+    }
+
+    #[test]
+    fn formats_millions() {
+        assert_eq!(format_number(1_000_000), "1,000,000");
+        assert_eq!(format_number(1_234_567), "1,234,567");
+        assert_eq!(format_number(12_345_678), "12,345,678");
+        assert_eq!(format_number(123_456_789), "123,456,789");
+    }
+
+    #[test]
+    fn formats_billions() {
+        assert_eq!(format_number(1_000_000_000), "1,000,000,000");
+        assert_eq!(format_number(1_234_567_890), "1,234,567,890");
     }
 }
 
