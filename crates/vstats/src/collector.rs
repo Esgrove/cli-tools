@@ -484,8 +484,8 @@ mod test_run {
         let hidden = temp_directory.path().join(".hidden.mp4");
         std::fs::write(&visible, b"visible")?;
         std::fs::write(&hidden, b"hidden")?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&visible, temp_directory.path().join("link.mp4"))?;
+        // Without the symlink privilege on Windows, the hidden file is still checked.
+        cli_tools_common::test_support::create_symlink(&visible, &temp_directory.path().join("link.mp4"));
 
         let found = StatsCollector::new(Config {
             root: temp_directory.path().to_path_buf(),
