@@ -63,8 +63,9 @@ jobs:
   lint:
     strategy:
       matrix:
-        # Windows lints the cfg(windows) code, which most of the filefind daemon and tray is
-        os: [ubuntu-latest, windows-latest]
+        # Run clippy on Linux, macOS, and Windows so platform-gated code
+        # (NTFS/USN/Win32, macOS AppKit tray, and Linux GTK/Unix paths) is linted everywhere
+        os: [ubuntu-latest, macos-latest, windows-latest]
       fail-fast: false
 
     runs-on: ${{ matrix.os }}
@@ -91,6 +92,10 @@ jobs:
       - name: Check formatting
         if: runner.os == 'Linux'
         run: cargo fmt --check --verbose
+
+      - name: Check minimal library features
+        if: runner.os == 'Linux'
+        run: cargo check -p filefind-common --no-default-features
 
       - name: Lint
         # Exit non-zero if there are any warnings
