@@ -5,6 +5,9 @@
 //!
 //! Uses postcard binary serialization for efficient, compact messages.
 
+// The Windows named pipe server calls raw Win32 APIs throughout this module.
+#![allow(unsafe_code)]
+
 #[cfg(windows)]
 use std::ffi::OsStr;
 #[cfg(not(windows))]

@@ -7,6 +7,9 @@
 //! - Administrator privileges are required to read the USN Journal.
 //! - Only works on NTFS-formatted volumes.
 
+// The Windows USN journal reading calls raw Win32 APIs throughout this module.
+#![allow(unsafe_code)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

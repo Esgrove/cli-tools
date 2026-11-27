@@ -1,12 +1,13 @@
 [package]
 name = "filefind-tray"
-description = "Filefind system tray application"
-authors.workspace = true
+description = "System tray application that controls the filefind daemon"
+version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "filefind-tray"
@@ -16,16 +17,15 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
-filefind-common = { workspace = true }
 dirs = { workspace = true }
+filefind-common = { workspace = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-tracing-appender = "0.2"
-tray-icon = "0.26"
+tray-icon = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_UI_Shell",

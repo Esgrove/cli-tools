@@ -129,6 +129,7 @@ fn init_logging_file(filter: LevelFilter) -> Result<()> {
 
 /// Check if this process has a console attached.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn has_console() -> bool {
     unsafe { !GetConsoleWindow().is_null() }
 }

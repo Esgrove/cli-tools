@@ -1,12 +1,13 @@
 [package]
 name = "filefind-daemon"
-description = "Filefind background file indexing daemon"
-authors.workspace = true
+description = "Background filefind daemon that indexes files and follows file system changes"
+version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "filefindd"
@@ -19,14 +20,13 @@ clap_complete = { workspace = true }
 colored = { workspace = true }
 dirs = { workspace = true }
 filefind-common = { workspace = true }
+futures = { workspace = true }
+notify = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-futures = "0.3"
-notify = "9.0"
-rayon = "1.12"
-tokio = { version = "1.54", features = ["full"] }
-tracing-appender = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

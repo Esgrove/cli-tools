@@ -77,6 +77,7 @@ pub fn run() -> Result<()> {
 
     // Run the Windows message loop
     #[cfg(windows)]
+    #[allow(unsafe_code)]
     {
         let mut msg: MSG = unsafe { std::mem::zeroed() };
 
@@ -189,6 +190,7 @@ fn handle_menu_event(
             quit_flag.store(true, Ordering::Relaxed);
 
             #[cfg(windows)]
+            #[allow(unsafe_code)]
             {
                 // Post WM_QUIT to exit the message loop
                 // SAFETY: PostQuitMessage is always safe to call

@@ -10,7 +10,9 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use filefind_common::config::OutputFormat;
 use filefind_common::types::FileEntry;
-use filefind_common::{Database, IndexedVolume, format_number, format_size, print_bold_magenta, print_bold_red, print_error};
+use filefind_common::{
+    Database, IndexedVolume, format_number, format_size, print_bold_magenta, print_bold_red, print_error,
+};
 
 use crate::config::CliConfig;
 use crate::hyperlink::Hyperlinker;

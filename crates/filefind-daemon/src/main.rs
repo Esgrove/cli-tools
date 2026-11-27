@@ -310,6 +310,7 @@ fn run_prune(config: &Config) -> Result<()> {
 /// Calling `FreeConsole` releases the process's association with its console,
 /// which causes Windows to close the console window.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn hide_console_window() {
     unsafe {
         // FreeConsole returns an error if the process is not attached to a console, which is harmless.

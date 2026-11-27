@@ -8,6 +8,9 @@
 //! - Only works on NTFS-formatted volumes.
 //! - Does NOT work on network drives, even if they report as NTFS.
 
+// The Windows MFT reading calls raw Win32 APIs throughout this module.
+#![allow(unsafe_code)]
+
 use std::collections::HashMap;
 #[cfg(windows)]
 use std::time::SystemTime;

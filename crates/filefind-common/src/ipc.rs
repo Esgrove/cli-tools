@@ -1437,6 +1437,7 @@ mod tests {
     /// Creates an anonymous pipe pair for testing.
     /// Returns (reader, writer) file handles.
     #[cfg(windows)]
+    #[allow(unsafe_code)]
     fn create_test_pipe() -> (std::fs::File, std::fs::File) {
         let mut read_handle = std::ptr::null_mut();
         let mut write_handle = std::ptr::null_mut();
