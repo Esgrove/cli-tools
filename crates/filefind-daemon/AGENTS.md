@@ -15,6 +15,7 @@ and the root `AGENTS.md` for the general workspace rules.
 - `usn.rs` - USN journal monitoring
 - `usn_buffer.rs` - Bounds checked readers for raw USN record buffers, shared by MFT and USN parsing
 - `watcher.rs` - File system watcher for non-NTFS drives
+- `watcher/pending_events.rs` - Debouncing watcher events and pairing the two halves of a rename
 
 ## MFT reading on NTFS drives
 
@@ -43,6 +44,9 @@ and the root `AGENTS.md` for the general workspace rules.
 - Falls back to the `notify` crate, which uses `ReadDirectoryChangesW` on Windows.
 - Walks the directories for the initial scan.
 - Receives change notifications in real time, debounced before they reach the daemon.
+- Renames become a single rename change when both the old and the new name are known.
+  An old name without a new one within the debounce period is a delete, and a new name without an old one is a create.
+- A renamed indexed directory moves its whole subtree in the index, and a deleted one removes it.
 
 ## Path types
 

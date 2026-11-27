@@ -5,19 +5,22 @@
 //!
 //! On Windows, this uses `ReadDirectoryChangesW`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use filefind_common::types::FileChangeEvent;
 use filefind_common::{extract_drive_letter, get_persistent_drive_mapping, is_unc_path, normalize_drive_root};
+
+mod pending_events;
+
+use pending_events::PendingEvents;
 
 /// Default debounce duration to coalesce rapid file changes.
 const DEFAULT_DEBOUNCE_MS: u64 = 1000;
@@ -171,14 +174,14 @@ impl FileWatcher {
 
             info!("File watcher started (debounce: {}ms)", debounce_ms);
 
-            let mut pending_events: HashMap<PathBuf, (FileChangeEvent, std::time::Instant)> = HashMap::new();
+            let mut pending_events = PendingEvents::new();
             let mut last_flush = std::time::Instant::now();
 
             while !process_shutdown.load(Ordering::Relaxed) {
                 let poll_interval = Duration::from_millis((debounce_ms / 2).clamp(50, 1000));
                 match tokio::time::timeout(poll_interval, notify_rx.recv()).await {
                     Ok(Some(event)) => {
-                        Self::ingest_notify_event(event, &exclude_patterns, &mut pending_events);
+                        pending_events.ingest(event, &exclude_patterns, std::time::Instant::now());
                     }
                     Ok(None) => break,
                     Err(_) => { /* Timeout – check for events to flush */ }
@@ -192,7 +195,7 @@ impl FileWatcher {
             }
 
             // Flush any remaining pending events on shutdown
-            for (change, _) in pending_events.into_values() {
+            for change in pending_events.take_all() {
                 let _ = event_tx.send(change).await;
             }
 
@@ -251,53 +254,11 @@ impl FileWatcher {
         warn!("Path does not exist, skipping: {}", path.display());
     }
 
-    /// Convert a [`notify::EventKind`] into a [`FileChangeEvent`] for the given path.
-    fn convert_notify_event(kind: EventKind, path: PathBuf) -> Option<FileChangeEvent> {
-        match kind {
-            EventKind::Create(_) => Some(FileChangeEvent::Created(path)),
-            EventKind::Modify(_) => Some(FileChangeEvent::Modified(path)),
-            EventKind::Remove(_) => Some(FileChangeEvent::Deleted(path)),
-            _ => None,
-        }
-    }
-
-    /// Filter, convert, and merge a single [`notify::Event`] into the pending-events map.
-    fn ingest_notify_event(
-        event: Event,
-        exclude_patterns: &[String],
-        pending_events: &mut HashMap<PathBuf, (FileChangeEvent, std::time::Instant)>,
-    ) {
-        let now = std::time::Instant::now();
-
-        for path in event.paths {
-            if matches_exclude_patterns(&path.to_string_lossy(), exclude_patterns) {
-                continue;
-            }
-
-            if let Some(change) = Self::convert_notify_event(event.kind, path.clone()) {
-                pending_events
-                    .entry(path)
-                    .and_modify(|(existing_change, _timestamp)| {
-                        // Keep Created if file was created then modified
-                        // (a new file being modified is still "created")
-                        // Otherwise, update to the latest event type
-                        if !matches!(
-                            (&existing_change, &change),
-                            (FileChangeEvent::Created(_), FileChangeEvent::Modified(_))
-                        ) {
-                            *existing_change = change.clone();
-                        }
-                    })
-                    .or_insert((change, now));
-            }
-        }
-    }
-
     /// Send debounced events that have aged past `debounce_duration`.
     ///
     /// Returns `Err(())` when the receiver has been dropped and the caller should stop the event loop.
     async fn flush_pending_events(
-        pending_events: &mut HashMap<PathBuf, (FileChangeEvent, std::time::Instant)>,
+        pending_events: &mut PendingEvents,
         last_flush: &mut std::time::Instant,
         debounce_duration: Duration,
         event_tx: &mpsc::Sender<FileChangeEvent>,
@@ -307,17 +268,7 @@ impl FileWatcher {
             return Ok(());
         }
 
-        let mut to_send = Vec::new();
-        pending_events.retain(|_path, (change, timestamp)| {
-            if now.duration_since(*timestamp) >= debounce_duration {
-                to_send.push(change.clone());
-                false
-            } else {
-                true
-            }
-        });
-
-        for change in to_send {
+        for change in pending_events.take_due(now, debounce_duration) {
             debug!("File change detected (debounced): {}", change);
             if event_tx.send(change).await.is_err() {
                 return Err(());
@@ -625,6 +576,29 @@ mod tests {
     use std::fs;
     use std::time::SystemTime;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_rename_event_becomes_a_rename_change() {
+        let event = Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        )))
+        .add_path(PathBuf::from("old.txt"))
+        .add_path(PathBuf::from("new.txt"));
+        let mut pending_events = PendingEvents::new();
+
+        pending_events.ingest(event, &[], std::time::Instant::now());
+
+        let changes = pending_events.take_all();
+        let described: Vec<String> = changes.iter().map(ToString::to_string).collect();
+        assert_eq!(changes.len(), 1, "unexpected changes: {described:?}");
+        assert!(
+            matches!(
+                changes.first(),
+                Some(FileChangeEvent::Renamed { from, to }) if from == Path::new("old.txt") && to == Path::new("new.txt")
+            ),
+            "unexpected changes: {described:?}"
+        );
+    }
 
     #[test]
     fn test_watcher_rescan_request_is_consumed() {
