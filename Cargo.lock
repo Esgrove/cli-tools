@@ -1529,6 +1529,7 @@ version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "cli-tools-db",
  "criterion",
  "dirs",
  "postcard",

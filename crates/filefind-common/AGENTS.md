@@ -14,6 +14,7 @@ The other filefind crates have their own `AGENTS.md`:
 - `lib.rs` - Library root, re-exports, path classification, and drive mapping helpers
 - `config.rs` - User configuration file handling
 - `database.rs` - `SQLite` index database operations
+- `database/schema.rs` - Versioned index schema, migrated as the `filefind_index` component of `cli-tools-db`
 - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
 - `types.rs` - File entries, volumes, and file change events
 
@@ -23,6 +24,8 @@ The other filefind crates have their own `AGENTS.md`:
 - Files are keyed by their full path, with a unique index on `full_path` and a case-insensitive index on `name`.
   Directories are ordinary rows with `is_directory` set.
 - Volume serial numbers identify drives, so a reconnected drive keeps its entries.
+- The schema version is recorded in `schema_migrations` through `cli_tools_db::sqlite::migrate_component`.
+  Bump `INDEX_SCHEMA_VERSION` and add a migration step for every schema change.
 - `update_file_path()` updates a file's stored path after a move and clears its MFT reference.
 - `rebase_files_under_path()` moves a directory and every entry under it in one statement.
 - The CLI and the daemon open the database directly. WAL mode lets the CLI write while the daemon runs.

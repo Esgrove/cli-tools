@@ -17,6 +17,10 @@ use tracing::{debug, trace};
 use crate::get_volume_prefix;
 use crate::types::{FileEntry, IndexedVolume, VolumeType};
 
+mod schema;
+
+pub use schema::{INDEX_SCHEMA_COMPONENT, INDEX_SCHEMA_VERSION};
+
 /// Batch size for MFT reference delete operations.
 const MFT_DELETE_BATCH_SIZE: usize = 500;
 const DUPLICATE_PROGRESS_UPDATE_INTERVAL: u64 = 1_000;
@@ -65,7 +69,7 @@ impl Database {
         let connection =
             Connection::open(path).with_context(|| format!("Failed to open database: {}", path.display()))?;
 
-        let database = Self { connection };
+        let mut database = Self { connection };
         database.initialize()?;
 
         Ok(database)
@@ -78,7 +82,7 @@ impl Database {
     pub fn open_in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
 
-        let database = Self { connection };
+        let mut database = Self { connection };
         database.initialize()?;
 
         Ok(database)
@@ -1154,59 +1158,9 @@ impl Database {
         Ok(groups)
     }
 
-    fn initialize(&self) -> Result<()> {
+    fn initialize(&mut self) -> Result<()> {
         self.register_regexp_function()?;
-
-        self.connection
-            .execute_batch(
-                r"
-                -- Indexed volumes/drives
-                CREATE TABLE IF NOT EXISTS volumes (
-                    id INTEGER PRIMARY KEY,
-                    serial_number TEXT NOT NULL UNIQUE,
-                    label TEXT,
-                    mount_point TEXT NOT NULL,
-                    volume_type TEXT NOT NULL,
-                    last_scan_time INTEGER,
-                    last_usn INTEGER,
-                    is_online INTEGER NOT NULL DEFAULT 1
-                );
-
-                -- Indexed files and directories
-                CREATE TABLE IF NOT EXISTS files (
-                    id INTEGER PRIMARY KEY,
-                    volume_id INTEGER NOT NULL,
-                    parent_id INTEGER,
-                    name TEXT NOT NULL,
-                    full_path TEXT NOT NULL,
-                    is_directory INTEGER NOT NULL,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    created_time INTEGER,
-                    modified_time INTEGER,
-                    mft_reference INTEGER,
-                    FOREIGN KEY (volume_id) REFERENCES volumes(id) ON DELETE CASCADE
-                );
-
-                -- Indexes for fast searching
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_files_path ON files(full_path);
-                CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
-                CREATE INDEX IF NOT EXISTS idx_files_volume ON files(volume_id);
-                CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent_id);
-                CREATE INDEX IF NOT EXISTS idx_files_is_directory ON files(is_directory);
-                CREATE INDEX IF NOT EXISTS idx_files_modified ON files(modified_time);
-                CREATE INDEX IF NOT EXISTS idx_files_volume_mft ON files(volume_id, mft_reference);
-
-                -- Enable foreign keys
-                PRAGMA foreign_keys = ON;
-
-                -- Performance optimizations
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -64000;
-                ",
-            )
-            .context("Failed to initialize database schema")?;
-
+        schema::initialize_schema(&mut self.connection)?;
         debug!("Database schema initialized");
         Ok(())
     }
@@ -4537,5 +4491,124 @@ mod tests {
         assert_eq!(entries[1].name, "photo.jpg");
         assert_eq!(entries[1].size, 5000);
         assert_eq!(entries[1].mft_reference, Some(99999));
+    }
+}
+
+#[cfg(test)]
+mod test_schema_version {
+    use cli_tools_db::sqlite::current_component_version;
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn new_database_records_the_index_schema_version() {
+        let temp = TempDir::new().unwrap();
+        let database = Database::open(&temp.path().join("filefind.db")).unwrap();
+
+        assert_eq!(
+            current_component_version(database.connection(), INDEX_SCHEMA_COMPONENT).unwrap(),
+            INDEX_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn in_memory_database_records_the_index_schema_version() {
+        let database = Database::open_in_memory().unwrap();
+
+        assert_eq!(
+            current_component_version(database.connection(), INDEX_SCHEMA_COMPONENT).unwrap(),
+            INDEX_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn unversioned_database_keeps_its_entries_and_gets_a_version() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("filefind.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE volumes (
+                    id INTEGER PRIMARY KEY,
+                    serial_number TEXT NOT NULL UNIQUE,
+                    label TEXT,
+                    mount_point TEXT NOT NULL,
+                    volume_type TEXT NOT NULL,
+                    last_scan_time INTEGER,
+                    last_usn INTEGER,
+                    is_online INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE files (
+                    id INTEGER PRIMARY KEY,
+                    volume_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    name TEXT NOT NULL,
+                    full_path TEXT NOT NULL,
+                    is_directory INTEGER NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    created_time INTEGER,
+                    modified_time INTEGER,
+                    mft_reference INTEGER,
+                    FOREIGN KEY (volume_id) REFERENCES volumes(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX idx_files_path ON files(full_path);
+                ",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO volumes (id, serial_number, mount_point, volume_type) VALUES (1, ?1, ?2, ?3)",
+                params!["OLD-VOLUME", "C:", "ntfs"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO files (volume_id, name, full_path, is_directory, size) VALUES (1, ?1, ?2, 0, 42)",
+                params!["kept.txt", r"C:\data\kept.txt"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = Database::open(&path).unwrap();
+
+        assert_eq!(
+            current_component_version(database.connection(), INDEX_SCHEMA_COMPONENT).unwrap(),
+            INDEX_SCHEMA_VERSION
+        );
+        let found = database.search_by_name("kept", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].full_path, r"C:\data\kept.txt");
+        assert_eq!(found[0].size, 42);
+    }
+
+    #[test]
+    fn reopening_a_current_database_keeps_the_version_and_entries() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("filefind.db");
+        let database = Database::open(&path).unwrap();
+        database
+            .upsert_volume(&IndexedVolume {
+                id: None,
+                serial_number: "REOPEN".into(),
+                label: None,
+                mount_point: "C:".into(),
+                volume_type: VolumeType::Ntfs,
+                is_online: true,
+                last_scan_time: None,
+                last_usn: None,
+            })
+            .unwrap();
+        drop(database);
+
+        let reopened = Database::open(&path).unwrap();
+
+        assert_eq!(
+            current_component_version(reopened.connection(), INDEX_SCHEMA_COMPONENT).unwrap(),
+            INDEX_SCHEMA_VERSION
+        );
+        assert_eq!(reopened.get_stats().unwrap().volume_count, 1);
     }
 }
