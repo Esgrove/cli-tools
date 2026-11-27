@@ -338,26 +338,18 @@ pub(crate) fn move_symlink_via_temp(source: &Path, destination: &Path) -> anyhow
 }
 
 /// Check if `path` is a symbolic link that Windows created as a directory link.
-///
-/// Unix links have no kind, so this is always false there.
-#[cfg_attr(
-    not(windows),
-    expect(
-        clippy::missing_const_for_fn,
-        reason = "the Windows branch reads file system metadata, which is not const"
-    )
-)]
+#[cfg(windows)]
 fn is_directory_symlink(path: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileTypeExt;
-        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink_dir())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        false
-    }
+    use std::os::windows::fs::FileTypeExt;
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink_dir())
+}
+
+/// Check if `path` is a directory symbolic link.
+///
+/// Unix links have no kind, so this is always false.
+#[cfg(not(windows))]
+const fn is_directory_symlink(_path: &Path) -> bool {
+    false
 }
 
 /// Create a symbolic link at `link` pointing to `target`, as a directory link on Windows when requested.
