@@ -57,8 +57,15 @@ cargo nextest run --workspace
 # Run tests with coverage report (text output)
 cargo llvm-cov nextest --workspace
 
-# Run clippy, all tests, and every fuzz target, see ./test.sh -h
+# Run formatting, clippy, all tests, and every fuzz target in parallel with the xtask test group, see ./test.sh -h
 ./test.sh
+
+# List the tasks of the test and install groups in xtask.toml
+cargo run --bin xtask -- list
+cargo run --bin xtask -- list install
+
+# Build every binary in one release build and install it with the xtask install group
+./install.sh
 
 # Run the property tests with more generated cases
 PROPTEST_CASES=20000 cargo test --workspace property

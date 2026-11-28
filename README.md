@@ -10,6 +10,10 @@ Shared helpers live in the [`cli-tools-common`](./crates/common), [`cli-tools-db
 ./install.sh
 ```
 
+`./install.sh` and `./test.sh` run the `install`
+and `test` task groups of [`xtask.toml`](./xtask.toml) with the [`xtask`](#xtask) runner from this repository,
+so independent steps run in parallel.
+
 Install a single tool straight from GitHub by its package name:
 
 ```shell
@@ -983,7 +987,7 @@ cargo test --workspace
 # Run tests for a single crate
 cargo test -p cli-tools-slb
 
-# Run clippy, every test, and each fuzz target for 30 seconds
+# Run clippy, every test, and each fuzz target for 30 seconds through the xtask test group
 ./test.sh
 
 # Deeper property tests and longer fuzzing, or skip fuzzing

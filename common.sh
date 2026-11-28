@@ -76,16 +76,6 @@ get_rust_executable_names() {
     }' "$REPO_ROOT"/crates/*/Cargo.toml
 }
 
-# Get the directories of the workspace crates that define at least one binary
-get_rust_binary_crate_directories() {
-    local manifest
-    for manifest in "$REPO_ROOT"/crates/*/Cargo.toml; do
-        if grep -q '^\[\[bin\]\]' "$manifest"; then
-            dirname "$manifest"
-        fi
-    done
-}
-
 # if DRYRUN or DRY_RUN has been set, only print commands instead of running them
 run_command() {
     if [ "$DRY_RUN" = true ] || [ "$DRYRUN" = true ]; then
@@ -94,4 +84,11 @@ run_command() {
         echo "Running: $*"
         "$@"
     fi
+}
+
+# Run the xtask runner built from this repository with the repository task file.
+# The installed xtask can be older than the task file, so the scripts always build the one in crates/xtask.
+run_xtask() {
+    cargo run --quiet --locked --manifest-path "$REPO_ROOT/Cargo.toml" --package cli-tools-xtask --bin xtask -- \
+        --config "$REPO_ROOT/xtask.toml" "$@"
 }

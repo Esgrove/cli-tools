@@ -1,7 +1,8 @@
 #!/bin/bash
 set -eo pipefail
 
-# Install the Rust binaries to path.
+# Install the Rust binaries to path through the xtask install group,
+# which builds every binary in one release build and copies them to the Cargo bin directory.
 
 # Import common functions
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -10,7 +11,8 @@ source "$DIR/common.sh"
 
 USAGE="Usage: $0 [OPTIONS]
 
-Install all Rust binaries to the Cargo bin directory.
+Install all Rust binaries to the Cargo bin directory with the xtask install group from xtask.toml.
+One release build compiles every binary, so cargo runs their link steps in parallel.
 
 OPTIONS: All options are optional
     -f | --force
@@ -88,10 +90,7 @@ if [ "$FORCE" = true ]; then
     find crates -path "*/src/*" -name "*.rs" -exec touch {} \;
 fi
 
-while IFS= read -r crate_directory; do
-    [ -n "$crate_directory" ] || continue
-    cargo install --force --locked --path "$crate_directory"
-done < <(get_rust_binary_crate_directories)
+run_xtask install
 echo ""
 
 print_green "Installed binaries:"
@@ -101,6 +100,3 @@ for executable in $(get_rust_executable_names); do
     fi
     echo "$("$executable" --version) from $(command -v "$executable")"
 done
-
-# Install shell completions
-./completions.sh --silent
