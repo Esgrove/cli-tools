@@ -62,14 +62,6 @@ impl Reporter {
         }
     }
 
-    /// Remember a completed change for the filefind index.
-    fn record_change(&self, change: PathChange) {
-        self.path_changes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(change);
-    }
-
     /// Log the run statistics, and print why processing stopped early and the run summary.
     pub(crate) fn finish(&self, summary: &RunSummary) {
         self.logger.log_stats(&summary.stats);
@@ -79,6 +71,14 @@ impl Reporter {
         }
 
         print_run_summary(&summary.stats);
+    }
+
+    /// Remember a completed change for the filefind index.
+    fn record_change(&self, change: PathChange) {
+        self.path_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(change);
     }
 
     /// Print the source and output of every duplicate found during the analysis.
