@@ -6,7 +6,7 @@ This is a Rust workspace containing multiple CLI utility tools.
 Each tool is its own crate under `crates/` with a package name prefixed by `cli-tools-`.
 The filefind file indexer is the exception,
 with its four `filefind-*` crates keeping their own names and binaries.
-Shared helpers live in the `cli-tools-common`, `cli-tools-db`, and `cli-tools-media` library crates.
+Shared helpers live in the `cli-tools-common`, `cli-tools-db`, `cli-tools-media`, and `cli-tools-version` library crates.
 Tools with reusable logic expose it as a library from the same crate,
 so other projects can depend on just that crate and extend it.
 Such a crate puts the dependencies only its binary uses behind a default `cli` feature,
@@ -178,6 +178,13 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `video_info.rs` - Video metadata from ffprobe
     - `file_hash.rs` - File hashing
     - `scan_cache.rs` - `SQLite` cache for directory scan results, behind the `scan-cache` feature
+- `crates/version/` → `cli-tools-version` - Build metadata of the binaries:
+    - `build.rs` - Records the git commit and branch, the UTC build time, and the rustc version,
+      rerunning only when the checked out commit changes. Values that cannot be read are empty strings.
+    - `lib.rs` - `VERSION_INFO`, which every binary passes to clap as `version`,
+      and `build_details()`, the multi-line form for user interfaces such as the filefind tray About window.
+      Only binaries depend on it, behind the `cli` feature in crates that also have a library, except xtask,
+      whose clap types live in its library.
 - `crates/dirmove/` → `dirmove` - Move files to matching directories.
   The binary holds the CLI arguments and subcommands, the run config, prompts, printing, progress bars,
   and the directory name database.
