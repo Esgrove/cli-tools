@@ -901,13 +901,14 @@ Run a project's tasks from an `xtask.toml` task file in parallel,
 with dependencies, priorities, exclusive resource locks, live output, and a log per task.
 The task file is found in the current directory or its parents up to the git repository root,
 and declares project specific flags such as `-a, --all` that combine with the generic options below.
+Task groups such as `test` and `install` keep separate task sets in one file, selected by name as in `xtask install`.
 Projects can also use it as a library and add their own Rust builtins.
 See the [crate README](./crates/xtask/README.md) for the task file reference.
 
 ```console
 Run a project's tasks from xtask.toml in parallel
 
-Usage: xtask [OPTIONS] [TASK]... [COMMAND]
+Usage: xtask [OPTIONS] [TASK|GROUP]... [COMMAND]
 
 Commands:
   list        List the resolved tasks, dependencies, and resource locks without running them
@@ -915,7 +916,7 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [TASK]...  Task IDs to run with their prerequisites, instead of every task enabled by the flags
+  [TASK|GROUP]...  Task groups and task IDs to run with their prerequisites, instead of the default tasks
 
 Options:
   -j, --jobs <N>         Maximum number of tasks to run concurrently [default: min(CPUs, 6)]

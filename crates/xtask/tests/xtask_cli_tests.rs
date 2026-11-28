@@ -119,12 +119,12 @@ fn runs_selected_task_ids_with_prerequisites() {
     let output = run_xtask(repository.path(), &["list", "use-device"]);
     let text = stdout(&output);
     assert!(output.status.success(), "{text}");
-    assert!(text.contains("Resolved tasks (2):"));
+    assert!(text.contains("Resolved tasks (2) "));
     assert!(text.contains("prepare"));
 
     let unknown = run_xtask(repository.path(), &["missing-task"]);
     assert!(!unknown.status.success());
-    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Unknown task ID 'missing-task'"));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Unknown task or group 'missing-task'"));
 }
 
 #[test]
@@ -332,7 +332,7 @@ command = ["true"]
     for args in [&["list", "fmt"][..], &["--scope", "rust", "list"]] {
         let listed = run_xtask(repository.path(), args);
         assert!(listed.status.success(), "{listed:?}");
-        assert!(stdout(&listed).contains("Resolved tasks (1):"));
+        assert!(stdout(&listed).contains("Resolved tasks (1) "));
         assert!(stdout(&listed).contains("  fmt"));
     }
     #[cfg(unix)]
@@ -416,5 +416,104 @@ command = ["true"]
     }
     let output = run_xtask(repository.path(), &["list", "fmt"]);
     assert!(output.status.success(), "{output:?}");
-    assert!(stdout(&output).contains("Resolved tasks (1):"));
+    assert!(stdout(&output).contains("Resolved tasks (1) "));
+}
+
+const GROUPED_TASK_FILE: &str = r#"
+[settings]
+default_group = "test"
+
+[groups.install]
+help = "Build and install the binaries"
+
+[[tasks]]
+id = "ungrouped"
+label = "Ungrouped"
+command = ["true"]
+
+[[tasks]]
+id = "unit-tests"
+label = "Unit tests"
+groups = ["test"]
+command = ["true"]
+
+[[tasks]]
+id = "build"
+label = "Build"
+groups = ["test", "install"]
+command = ["true"]
+
+[[tasks]]
+id = "copy"
+label = "Copy"
+groups = ["install"]
+deps = ["build"]
+command = ["true"]
+"#;
+
+/// Task IDs listed by `xtask list` with the given extra arguments.
+fn listed_task_ids(directory: &Path, args: &[&str]) -> Vec<String> {
+    let output = run_xtask(directory, &[&["list"], args].concat());
+    let text = stdout(&output);
+    assert!(
+        output.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[test]
+fn plain_run_takes_ungrouped_tasks_and_the_default_group() {
+    let repository = repository_with_tasks(GROUPED_TASK_FILE);
+    assert_eq!(
+        listed_task_ids(repository.path(), &[]),
+        ["ungrouped", "unit-tests", "build"]
+    );
+}
+
+#[test]
+fn named_group_runs_only_its_tasks() {
+    let repository = repository_with_tasks(GROUPED_TASK_FILE);
+    assert_eq!(listed_task_ids(repository.path(), &["install"]), ["build", "copy"]);
+
+    let output = run_xtask(repository.path(), &["--dryrun", "install"]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("copy"));
+    assert!(!text.contains("unit-tests"));
+}
+
+#[test]
+fn groups_and_task_ids_combine() {
+    let repository = repository_with_tasks(GROUPED_TASK_FILE);
+    assert_eq!(
+        listed_task_ids(repository.path(), &["install", "ungrouped"]),
+        ["ungrouped", "build", "copy"]
+    );
+}
+
+#[test]
+fn help_lists_the_task_groups() {
+    let repository = repository_with_tasks(GROUPED_TASK_FILE);
+    let output = run_xtask(repository.path(), &["--help"]);
+    let text = stdout(&output);
+    assert!(output.status.success());
+    assert!(text.contains("Task groups:"), "{text}");
+    assert!(text.contains("install  Build and install the binaries"), "{text}");
+    assert!(text.contains("test     (default)"), "{text}");
+}
+
+#[test]
+fn unknown_name_lists_groups_and_tasks() {
+    let repository = repository_with_tasks(GROUPED_TASK_FILE);
+    let output = run_xtask(repository.path(), &["deploy"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Unknown task or group 'deploy'"), "{error}");
+    assert!(error.contains("Groups: install, test"), "{error}");
 }

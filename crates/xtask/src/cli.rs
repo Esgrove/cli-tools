@@ -14,8 +14,9 @@ use clap::{Arg, ArgAction, ArgMatches, CommandFactory, FromArgMatches, Parser, S
 use cli_tools_common::CompletionArgs;
 use serde::Deserialize;
 
-use crate::config::{TaskFile, TaskFileLocation};
+use crate::config::{GroupConfig, TaskFile, TaskFileLocation};
 use crate::process::shell_quote;
+use crate::selection::SelectedNames;
 
 /// Generic command line arguments shared by every project.
 /// Built-in short options that take a value, so the rest of a group of short flags after one of them is that value.
@@ -27,8 +28,8 @@ pub enum XtaskCommand {
     /// List the resolved tasks, dependencies, and resource locks without running them
     #[command(name = "list")]
     List {
-        /// Task IDs to list with their prerequisites, instead of every task enabled by the flags
-        #[arg(value_name = "TASK")]
+        /// Task groups and task IDs to list with their prerequisites, instead of the default tasks
+        #[arg(value_name = "TASK|GROUP")]
         task_ids: Vec<String>,
     },
 
@@ -89,8 +90,8 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<XtaskCommand>,
 
-    /// Task IDs to run with their prerequisites, instead of every task enabled by the flags
-    #[arg(value_name = "TASK")]
+    /// Task groups and task IDs to run with their prerequisites, instead of the default tasks
+    #[arg(value_name = "TASK|GROUP")]
     pub task_ids: Vec<String>,
 
     /// Maximum number of tasks to run concurrently [default: min(CPUs, 6)]
@@ -144,6 +145,8 @@ pub struct ParsedCli {
 pub struct RunOptions {
     /// Explicit task IDs to run (plus their prerequisites).
     pub task_ids: Vec<String>,
+    /// Task groups whose tasks to run (plus their prerequisites).
+    pub groups: Vec<String>,
     /// Maximum number of concurrent tasks.
     pub jobs: usize,
     /// Stop scheduling new tasks after the first failure.
@@ -268,28 +271,48 @@ impl ParsedCli {
     /// # Errors
     ///
     /// Returns an error if a flag's `requires` or `platforms` constraint is not met.
+    ///
+    /// Positional names that match a task group select that group, the others are task IDs.
+    /// Without names the default group is selected.
+    /// The selected groups' `jobs` and `fail_fast` take precedence over the task file settings and user config,
+    /// and the smallest `jobs` applies when several groups set it.
     pub fn into_options(self, task_file: &TaskFile, user_config: &UserConfig, current_os: &str) -> Result<RunOptions> {
         let flags = resolve_flags(task_file, &self.flags, current_os)?;
         let rerun_prefix = self.rerun_prefix(task_file);
         let args = self.args;
-        let (task_ids, list_tasks) = match args.command {
+        let (names, list_tasks) = match args.command {
             Some(XtaskCommand::List { task_ids }) => (task_ids, true),
             _ => (args.task_ids, false),
         };
-        let task_ids = task_ids
-            .into_iter()
-            .map(|id| id.trim().to_owned())
-            .filter(|id| !id.is_empty())
-            .collect();
-        let jobs = match args.jobs.or(task_file.settings.jobs).or(user_config.jobs) {
+        let SelectedNames { groups, task_ids } = SelectedNames::from_names(task_file, names);
+        let nothing_named = groups.is_empty() && task_ids.is_empty();
+        let selected_groups: Vec<GroupConfig> = if nothing_named {
+            task_file
+                .settings
+                .default_group
+                .iter()
+                .map(|name| task_file.group(name))
+                .collect()
+        } else {
+            groups.iter().map(|name| task_file.group(name)).collect()
+        };
+        let group_jobs = selected_groups.iter().filter_map(|group| group.jobs).min();
+        let group_fail_fast = selected_groups.iter().any(|group| group.fail_fast);
+        let jobs = match args
+            .jobs
+            .or(group_jobs)
+            .or(task_file.settings.jobs)
+            .or(user_config.jobs)
+        {
             Some(0) => bail!("jobs must be at least 1"),
             Some(jobs) => jobs,
             None => default_jobs().max(1),
         };
         Ok(RunOptions {
             task_ids,
+            groups,
             jobs,
-            fail_fast: args.fail_fast || user_config.fail_fast,
+            fail_fast: args.fail_fast || group_fail_fast || user_config.fail_fast,
             list_tasks,
             scope: args.scope,
             dry_run: args.dryrun,
@@ -440,8 +463,13 @@ pub fn build_command(task_file: Option<&TaskFile>, location: Option<&TaskFileLoc
             command = command.arg(arg);
         }
     }
+    let mut after_help = task_file.map_or_default(group_help);
     if let Some(location) = location {
-        command = command.after_help(format!("Task file: {}", location.path.display()));
+        after_help.push_str("Task file: ");
+        after_help.push_str(&location.path.display().to_string());
+    }
+    if !after_help.is_empty() {
+        command = command.after_help(after_help.trim_end().to_owned());
     }
     command
 }
@@ -572,6 +600,32 @@ pub fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map_or(4, std::num::NonZeroUsize::get)
         .clamp(1, 6)
+}
+
+/// The task group list shown in `--help`, with the help text of each group and the default group marked.
+///
+/// Empty when the task file has no groups.
+fn group_help(task_file: &TaskFile) -> String {
+    let groups = task_file.known_groups();
+    let width = groups.iter().map(|name| name.len()).max().unwrap_or_default();
+    let mut text = String::new();
+    if groups.is_empty() {
+        return text;
+    }
+    text.push_str("Task groups:\n");
+    for name in groups {
+        let mut description = task_file.group(name).help;
+        if task_file.settings.default_group.as_deref() == Some(name) {
+            if !description.is_empty() {
+                description.push(' ');
+            }
+            description.push_str("(default)");
+        }
+        text.push_str(format!("  {name:<width$}  {description}").trim_end());
+        text.push('\n');
+    }
+    text.push('\n');
+    text
 }
 
 /// Read every project flag's value from parsed matches.
@@ -923,5 +977,98 @@ mod test_ui_resolution {
             ..RunOptions::default()
         };
         assert!(!plain.resolve_ui(&github).github_actions);
+    }
+}
+
+#[cfg(test)]
+mod test_group_options {
+    use super::*;
+
+    const GROUPED_TASK_FILE: &str = r#"
+        [settings]
+        jobs = 6
+        default_group = "test"
+
+        [groups.test]
+        jobs = 4
+
+        [groups.install]
+        help = "Install the binaries"
+        jobs = 2
+        fail_fast = true
+
+        [[tasks]]
+        id = "fmt"
+        label = "Formatting"
+        groups = ["test"]
+        command = ["true"]
+
+        [[tasks]]
+        id = "build"
+        label = "Build"
+        groups = ["install"]
+        command = ["true"]
+
+        [[tasks]]
+        id = "lint"
+        label = "Lint"
+        command = ["true"]
+    "#;
+
+    fn grouped_options(argv: &[&str]) -> RunOptions {
+        let task_file = TaskFile::from_toml_str(GROUPED_TASK_FILE).unwrap();
+        task_file.validate(&std::collections::BTreeSet::new()).unwrap();
+        parse_args(argv, Some(&task_file), None)
+            .unwrap()
+            .into_options(&task_file, &UserConfig::default(), "macos")
+            .unwrap()
+    }
+
+    #[test]
+    fn splits_positional_names_into_groups_and_task_ids() {
+        let options = grouped_options(&["xtask", "install", "lint", " ", "test"]);
+        assert_eq!(options.groups, ["install", "test"]);
+        assert_eq!(options.task_ids, ["lint"]);
+
+        let listed = grouped_options(&["xtask", "list", "install"]);
+        assert!(listed.list_tasks);
+        assert_eq!(listed.groups, ["install"]);
+        assert_eq!(listed.task_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn selected_group_settings_override_the_task_file_settings() {
+        let install = grouped_options(&["xtask", "install"]);
+        assert_eq!(install.jobs, 2);
+        assert!(install.fail_fast);
+
+        let both = grouped_options(&["xtask", "test", "install"]);
+        assert_eq!(both.jobs, 2, "the smallest group jobs applies");
+
+        let only_tasks = grouped_options(&["xtask", "lint"]);
+        assert_eq!(only_tasks.jobs, 6);
+        assert!(!only_tasks.fail_fast);
+    }
+
+    #[test]
+    fn plain_run_uses_the_default_group_settings() {
+        let options = grouped_options(&["xtask"]);
+        assert_eq!(options.jobs, 4);
+        assert_eq!(options.groups, Vec::<String>::new());
+    }
+
+    #[test]
+    fn jobs_option_overrides_group_jobs() {
+        assert_eq!(grouped_options(&["xtask", "-j", "8", "install"]).jobs, 8);
+    }
+
+    #[test]
+    fn help_lists_groups_and_marks_the_default() {
+        let task_file = TaskFile::from_toml_str(GROUPED_TASK_FILE).unwrap();
+        assert_eq!(
+            group_help(&task_file),
+            "Task groups:\n  install  Install the binaries\n  test     (default)\n\n"
+        );
+        assert_eq!(group_help(&TaskFile::default()), "");
     }
 }

@@ -18,9 +18,10 @@ use crate::condition::Condition;
 use crate::config::{CommandStepConfig, EnvProfile, TaskConfig, TaskFile, TaskFileLocation};
 use crate::process::{CommandSpec, command_exists, require_command};
 use crate::scheduler::{
-    SharedState, TaskAction, TaskActionResult, TaskContext, TaskOutcome, TaskSpec, filter_tasks, print_task_list,
-    run_schedule, validate_graph,
+    SharedState, TaskAction, TaskActionResult, TaskContext, TaskOutcome, TaskSpec, print_task_list, run_schedule,
+    validate_graph,
 };
+use crate::selection::{Selection, filter_tasks};
 use crate::ui::{Reporter, UiConfig};
 
 /// Default log directory relative to the project root.
@@ -146,9 +147,11 @@ pub fn run(
     let env = EnvSnapshot::from_process();
     let root = &location.root;
     let tasks = plan(task_file, location, options, builtins, env.is_ci())?;
+    let selection_label = Selection::new(task_file, &options.groups, &options.task_ids, options.scope.as_deref())?
+        .label(options.scope.as_deref());
 
     if options.list_tasks {
-        print_task_list(&tasks);
+        print_task_list(&tasks, &selection_label);
         return Ok(true);
     }
 
@@ -172,8 +175,7 @@ pub fn run(
         })),
     };
 
-    let scope_label = options.scope.as_deref().unwrap_or("all");
-    let summary = run_schedule(tasks, &context, options.jobs, options.fail_fast, scope_label)?;
+    let summary = run_schedule(tasks, &context, options.jobs, options.fail_fast, &selection_label)?;
     reporter.finish_and_print_summary(&summary, root, options.dry_run);
     let requested_task_blocked = summary
         .reports
@@ -182,11 +184,11 @@ pub fn run(
     Ok(summary.is_success() && !requested_task_blocked)
 }
 
-/// The tasks a run would execute, in task file order, after applying conditions, the scope, and task IDs.
+/// The tasks a run would execute, in task file order, after applying conditions, groups, the scope, and task IDs.
 ///
 /// # Errors
 ///
-/// Returns an error if conditions cannot be evaluated, a task ID or scope is unknown,
+/// Returns an error if conditions cannot be evaluated, a task ID, group, or scope is unknown,
 /// or the selected dependency graph is invalid.
 pub fn plan(
     task_file: &TaskFile,
@@ -202,8 +204,8 @@ pub fn plan(
         is_ci,
     };
     let enabled_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
-    let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
-    let mut selected = filter_tasks(enabled_tasks, selected_scopes.as_ref(), &options.task_ids)?;
+    let selection = Selection::new(task_file, &options.groups, &options.task_ids, options.scope.as_deref())?;
+    let mut selected = filter_tasks(enabled_tasks, &selection)?;
     resolve_selected_dependencies(task_file, &mut selected)?;
     validate_graph(&selected)?;
     Ok(selected)
@@ -268,6 +270,7 @@ fn build_tasks(
             after: task.after.clone(),
             resources: task.locks.clone(),
             scopes: task.scopes.clone(),
+            groups: task.groups.clone(),
             dry_run_summary,
             action,
         });
@@ -388,21 +391,6 @@ fn build_command_action(
         }
         Ok(TaskActionResult::Passed)
     }))
-}
-
-/// Validate the requested scope and return it together with every scope it includes.
-fn resolve_scope(task_file: &TaskFile, scope: Option<&str>) -> Result<Option<BTreeSet<String>>> {
-    let Some(scope) = scope.filter(|scope| *scope != "all") else {
-        return Ok(None);
-    };
-    let known = task_file.known_scopes();
-    if !known.contains(scope) {
-        bail!(
-            "Unknown scope '{scope}'. Available: all, {}",
-            known.into_iter().collect::<Vec<_>>().join(", ")
-        );
-    }
-    Ok(Some(task_file.expand_scope(scope)))
 }
 
 /// Build the command for one step with expanded variables and the task environment.
@@ -895,26 +883,5 @@ mod test_conditions_and_scopes {
         let error = resolve_selected_dependencies(&task_file, &mut tasks)
             .expect_err("a hard dependency on a disabled task should fail");
         assert!(error.to_string().contains("'web-tests', which is not enabled"));
-    }
-
-    #[test]
-    fn resolves_scopes_with_includes() {
-        let task_file = TaskFile::from_toml_str(TASK_FILE).expect("should parse");
-        assert!(resolve_scope(&task_file, None).expect("should resolve").is_none());
-        assert!(
-            resolve_scope(&task_file, Some("all"))
-                .expect("should resolve")
-                .is_none()
-        );
-        let mobile = resolve_scope(&task_file, Some("mobile"))
-            .expect("should resolve")
-            .expect("should select scopes");
-        assert!(mobile.contains("ios") && mobile.contains("android"));
-        let error = resolve_scope(&task_file, Some("backend")).expect_err("unknown scope");
-        assert!(
-            error
-                .to_string()
-                .contains("Available: all, android, ios, mobile, rust, web")
-        );
     }
 }

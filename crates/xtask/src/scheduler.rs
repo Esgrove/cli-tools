@@ -118,6 +118,8 @@ pub struct TaskSpec {
     pub resources: Vec<Resource>,
     /// Scope tags this task belongs to.
     pub scopes: Vec<String>,
+    /// Groups this task belongs to, empty when it runs only without named groups or tasks.
+    pub groups: Vec<String>,
     /// Concise command summary printed in `--dryrun` and `list`.
     pub dry_run_summary: String,
     /// Action executed when the task is scheduled.
@@ -319,42 +321,9 @@ pub fn validate_graph(tasks: &[TaskSpec]) -> Result<()> {
     Ok(())
 }
 
-/// Filter `tasks` by scope and optional explicit task IDs (including transitive prerequisites).
-///
-/// `scopes` holds the selected scope and every scope it includes, or `None` to keep every task.
-///
-/// # Errors
-///
-/// Returns an error if `only` references a task ID that does not exist in the resolved graph.
-pub fn filter_tasks(tasks: Vec<TaskSpec>, scopes: Option<&BTreeSet<String>>, only: &[String]) -> Result<Vec<TaskSpec>> {
-    let by_id: BTreeMap<String, Vec<String>> = tasks.iter().map(|task| (task.id.clone(), task.deps.clone())).collect();
-
-    let mut keep = BTreeSet::new();
-    if only.is_empty() {
-        for task in &tasks {
-            if scopes.is_none_or(|selected| task.scopes.iter().any(|scope| selected.contains(scope))) {
-                collect_with_deps(&task.id, &by_id, &mut keep);
-            }
-        }
-    } else {
-        for id in only {
-            if !by_id.contains_key(id) {
-                let available: Vec<&str> = by_id.keys().map(String::as_str).collect();
-                bail!(
-                    "Unknown task ID '{id}'. Available tasks for the current flags: {}",
-                    available.join(", ")
-                );
-            }
-            collect_with_deps(id, &by_id, &mut keep);
-        }
-    }
-
-    Ok(tasks.into_iter().filter(|task| keep.contains(&task.id)).collect())
-}
-
-/// Print the resolved task graph without running it.
-pub fn print_task_list(tasks: &[TaskSpec]) {
-    let _ = writeln!(io::stdout(), "Resolved tasks ({}):", tasks.len());
+/// Print the resolved task graph without running it, headed by the selection label.
+pub fn print_task_list(tasks: &[TaskSpec], selection_label: &str) {
+    let _ = writeln!(io::stdout(), "Resolved tasks ({}) for {selection_label}:", tasks.len());
     for task in tasks {
         let deps = if task.deps.is_empty() {
             "none".to_owned()
@@ -698,18 +667,6 @@ fn pick_ready_task(guard: &SchedulerState) -> Option<String> {
     best.map(|(id, _)| id.to_owned())
 }
 
-/// Recursively collect `id` and all of its transitive dependencies into `keep`.
-fn collect_with_deps(id: &str, by_id: &BTreeMap<String, Vec<String>>, keep: &mut BTreeSet<String>) {
-    if !keep.insert(id.to_owned()) {
-        return;
-    }
-    if let Some(deps) = by_id.get(id) {
-        for dep in deps {
-            collect_with_deps(dep, by_id, keep);
-        }
-    }
-}
-
 #[cfg(test)]
 mod test_scheduler {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -740,6 +697,7 @@ mod test_scheduler {
             after: Vec::new(),
             resources: resources.iter().map(|r| (*r).to_owned()).collect(),
             scopes: Vec::new(),
+            groups: Vec::new(),
             dry_run_summary: id.to_owned(),
             action: Box::new(|_, _| Ok(TaskActionResult::Passed)),
         }
@@ -851,6 +809,7 @@ mod test_scheduler {
                 after: Vec::new(),
                 resources,
                 scopes: Vec::new(),
+                groups: Vec::new(),
                 dry_run_summary: id.to_owned(),
                 action: Box::new(move |_, _| {
                     let total = active_total.fetch_add(1, Ordering::SeqCst) + 1;
@@ -914,6 +873,7 @@ mod test_scheduler {
                 after: Vec::new(),
                 resources: Vec::new(),
                 scopes: Vec::new(),
+                groups: Vec::new(),
                 dry_run_summary: "fail".to_owned(),
                 action: Box::new(|task_ctx, log_path| {
                     task_ctx.log_note(log_path, "about to fail")?;
@@ -941,19 +901,6 @@ mod test_scheduler {
     }
 
     #[test]
-    fn filter_only_pulls_in_transitive_dependencies() {
-        let tasks = vec![
-            noop_task("a", 1, &[], &[]),
-            noop_task("b", 1, &["a"], &[]),
-            noop_task("c", 1, &["b"], &[]),
-            noop_task("d", 1, &[], &[]),
-        ];
-        let filtered = filter_tasks(tasks, None, &["c".to_owned()]).unwrap();
-        let ids: Vec<&str> = filtered.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b", "c"]);
-    }
-
-    #[test]
     fn lower_priority_number_runs_first() {
         let ctx = test_context("priority-order");
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -968,6 +915,7 @@ mod test_scheduler {
                 after: Vec::new(),
                 resources: vec!["single-lock".to_owned()],
                 scopes: Vec::new(),
+                groups: Vec::new(),
                 dry_run_summary: id_owned.clone(),
                 action: Box::new(move |_, _| {
                     order.lock().unwrap().push(id_owned);
@@ -994,6 +942,7 @@ mod test_scheduler {
             after: Vec::new(),
             resources: vec!["shared-lock".to_owned()],
             scopes: Vec::new(),
+            groups: Vec::new(),
             dry_run_summary: "boom".to_owned(),
             action: Box::new(|_, _| panic!("builtin exploded")),
         };

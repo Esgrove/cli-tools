@@ -2,7 +2,7 @@
 //!
 //! The task file is searched for in the current directory and its parents,
 //! stopping at the root of the git repository the current directory is in.
-//! It declares project flags, named conditions, scopes, environment profiles, and the task graph.
+//! It declares project flags, named conditions, scopes, task groups, environment profiles, and the task graph.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub const RESERVED_LONG_FLAGS: &[&str] = &[
 /// Platforms a flag can be limited to with `platforms`.
 const PLATFORMS: &[&str] = &["macos", "linux", "windows"];
 
-/// Names of the subcommands, which cannot be used as task IDs.
+/// Names of the subcommands, which cannot be used as task IDs or group names.
 const SUBCOMMANDS: &[&str] = &["completion", "list"];
 
 /// Required command entry supporting either `"tool"` or `{ name = "tool", hint = "..." }`.
@@ -70,6 +70,9 @@ pub struct TaskFile {
     /// Scopes that include other scopes for `--scope`.
     #[serde(default)]
     pub scopes: BTreeMap<String, ScopeConfig>,
+    /// Task groups with their help text and settings, keyed by group name.
+    #[serde(default)]
+    pub groups: BTreeMap<String, GroupConfig>,
     /// Named sets of environment changes applied to tasks with `env_profile`.
     #[serde(default)]
     pub env_profiles: BTreeMap<String, EnvProfile>,
@@ -92,6 +95,8 @@ pub struct Settings {
     /// for example `["cargo", "run", "--quiet", "--package", "xtask", "--"]`.
     #[serde(default)]
     pub runner: Vec<String>,
+    /// Group whose tasks a run without task IDs or group names includes besides the ungrouped tasks.
+    pub default_group: Option<String>,
 }
 
 /// One `[flags.<name>]` entry.
@@ -121,6 +126,22 @@ pub struct ScopeConfig {
     /// Other scopes whose tasks also belong to this scope.
     #[serde(default)]
     pub includes: Vec<String>,
+}
+
+/// One `[groups.<name>]` entry.
+///
+/// A group also exists without a table when a task names it in `groups`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupConfig {
+    /// Help text shown in the task group list of `--help`.
+    #[serde(default)]
+    pub help: String,
+    /// Maximum number of concurrent tasks when this group is selected, unless `--jobs` is given.
+    pub jobs: Option<usize>,
+    /// Stop starting new tasks after the first failure when this group is selected.
+    #[serde(default)]
+    pub fail_fast: bool,
 }
 
 /// One `[env_profiles.<name>]` entry.
@@ -158,6 +179,9 @@ pub struct TaskConfig {
     /// Scope tags for `--scope`.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Groups this task belongs to, empty for a task that runs when no group or task is named.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// Condition expression that must hold for this task to be included (default: always).
     pub when: Option<String>,
     /// Commands that must exist on `PATH` before executing.
@@ -242,7 +266,7 @@ impl TaskFile {
         Ok(toml::from_str(raw)?)
     }
 
-    /// Check flags, conditions, scopes, environment profiles, and tasks for consistency.
+    /// Check flags, conditions, groups, environment profiles, and tasks for consistency.
     ///
     /// `builtins` lists the builtin names the running binary provides.
     ///
@@ -268,6 +292,7 @@ impl TaskFile {
             self.validate_task(task, builtins)?;
         }
         self.validate_task_graph()?;
+        self.validate_groups()?;
         Ok(())
     }
 
@@ -302,6 +327,26 @@ impl TaskFile {
                     .flat_map(|task| task.scopes.iter().map(String::as_str)),
             )
             .collect()
+    }
+
+    /// Every group name that is declared in `[groups]` or used by a task.
+    #[must_use]
+    pub fn known_groups(&self) -> BTreeSet<&str> {
+        self.groups
+            .keys()
+            .map(String::as_str)
+            .chain(
+                self.tasks
+                    .iter()
+                    .flat_map(|task| task.groups.iter().map(String::as_str)),
+            )
+            .collect()
+    }
+
+    /// Settings of the named group, the defaults for a group without a `[groups]` table.
+    #[must_use]
+    pub fn group(&self, name: &str) -> GroupConfig {
+        self.groups.get(name).cloned().unwrap_or_default()
     }
 
     /// The scope itself plus every scope it includes, directly or through other scopes.
@@ -491,6 +536,36 @@ impl TaskFile {
         let mut done = BTreeSet::new();
         for task in &self.tasks {
             visit(task.id.as_str(), &by_id, &mut Vec::new(), &mut done)?;
+        }
+        Ok(())
+    }
+
+    /// Check group names, their settings, and `default_group`.
+    ///
+    /// Group names share the positional arguments with task IDs, so they cannot match a task ID or a subcommand.
+    fn validate_groups(&self) -> Result<()> {
+        let task_ids: BTreeSet<&str> = self.tasks.iter().map(|task| task.id.as_str()).collect();
+        for name in self.known_groups() {
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || name.starts_with('-')
+            {
+                bail!("Group name '{name}' must contain only letters, digits, and dashes, and not start with a dash");
+            }
+            if SUBCOMMANDS.contains(&name) {
+                bail!("Group name '{name}' is reserved for the xtask subcommand of the same name");
+            }
+            if task_ids.contains(name) {
+                bail!("Group '{name}' has the same name as a task. Group names and task IDs must differ.");
+            }
+        }
+        for (name, group) in &self.groups {
+            if group.jobs == Some(0) {
+                bail!("groups.{name}.jobs must be at least 1");
+            }
+        }
+        if let Some(default_group) = &self.settings.default_group
+            && !self.known_groups().contains(default_group.as_str())
+        {
+            bail!("settings.default_group '{default_group}' is not a known group");
         }
         Ok(())
     }
@@ -793,5 +868,67 @@ mod test_task_file_discovery {
         assert_eq!(location.path, file);
         assert_eq!(location.root, directory);
         assert!(TaskFileLocation::from_path(Path::new("missing.toml"), &directory).is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_task_groups {
+    use super::*;
+
+    fn validate(raw: &str) -> Result<()> {
+        TaskFile::from_toml_str(raw)?.validate(&BTreeSet::new())
+    }
+
+    #[test]
+    fn accepts_groups_from_tables_and_tasks() {
+        let raw = r#"
+            [settings]
+            default_group = "test"
+
+            [groups.install]
+            help = "Install the binaries"
+            jobs = 2
+            fail_fast = true
+
+            [[tasks]]
+            id = "fmt"
+            label = "Formatting"
+            groups = ["test", "ci"]
+            command = ["true"]
+        "#;
+        let task_file = TaskFile::from_toml_str(raw).unwrap();
+        task_file.validate(&BTreeSet::new()).unwrap();
+        assert_eq!(
+            task_file.known_groups().into_iter().collect::<Vec<_>>(),
+            ["ci", "install", "test"]
+        );
+        assert_eq!(task_file.group("install").jobs, Some(2));
+        assert_eq!(task_file.group("ci").jobs, None);
+    }
+
+    #[test]
+    fn rejects_group_named_like_a_task_or_subcommand() {
+        let clash = "[[tasks]]\nid = \"fmt\"\nlabel = \"F\"\ngroups = [\"fmt\"]\ncommand = [\"true\"]";
+        let error = validate(clash).unwrap_err();
+        assert!(error.to_string().contains("same name as a task"), "{error}");
+        assert!(validate("[groups.list]").is_err());
+        assert!(validate("[groups.completion]").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_group_names() {
+        for name in ["-install", "in stall", "a/b", ""] {
+            let raw = format!("[groups.\"{name}\"]");
+            assert!(validate(&raw).is_err(), "{name}");
+        }
+        assert!(validate("[groups.install-all]").is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_default_group_zero_jobs_and_unknown_keys() {
+        assert!(validate("[settings]\ndefault_group = \"test\"").is_err());
+        assert!(validate("[settings]\ndefault_group = \"test\"\n[groups.test]").is_ok());
+        assert!(validate("[groups.test]\njobs = 0").is_err());
+        assert!(TaskFile::from_toml_str("[groups.test]\nparallel = true").is_err());
     }
 }

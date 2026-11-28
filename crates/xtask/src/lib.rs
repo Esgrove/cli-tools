@@ -33,6 +33,7 @@ mod config;
 mod process;
 mod runner;
 mod scheduler;
+mod selection;
 mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};

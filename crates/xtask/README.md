@@ -31,10 +31,19 @@ xtask -ac
 # Run selected tasks and their prerequisites
 xtask cargo-fmt cargo-clippy
 
+# Run a task group, alone or together with other groups and tasks
+xtask install
+xtask test cargo-fmt
+
 # Show what would run
 xtask list
 xtask --dryrun -a
 ```
+
+Without task IDs or group names, `xtask` runs the tasks that belong to no group
+and the tasks of `default_group`, both filtered by the flags and `--scope`.
+Naming a group runs only that group's tasks, plus the prerequisites they name in `deps` from any group.
+See [Task groups](#task-groups).
 
 Both `list` and normal runs validate the selected tasks and their hard prerequisites.
 An `after` entry must name a task in the file, but only orders tasks that are both selected.
@@ -82,6 +91,8 @@ jobs = 6
 rerun_prefix = "./test.sh"
 # Project runner that the generic xtask binary hands the run over to, see "Rust builtins"
 runner = ["cargo", "run", "--quiet", "--package", "xtask", "--"]
+# Group a run without task IDs or group names includes besides the ungrouped tasks
+default_group = "test"
 
 # Project flags become command line options. They cannot reuse the generic options.
 [flags.all]
@@ -108,6 +119,13 @@ full-web = "web && !ci"
 [scopes.mobile]
 includes = ["ios", "android"]
 
+# Task groups. A group also exists without a table when a task names it in `groups`.
+[groups.install]
+help = "Build and install the binaries"
+# Concurrency and fail fast when this group is selected, overriding [settings] but not --jobs
+jobs = 4
+fail_fast = true
+
 # Environment changes shared by several tasks.
 [env_profiles.offline]
 set = { SQLX_OFFLINE = "true" }
@@ -121,6 +139,7 @@ deps = ["web-deps"]         # must be enabled and pass first
 after = ["cargo-fmt"]       # ordering that only applies when both tasks run
 locks = ["cargo-target"]    # no other task holding the same lock runs at the same time
 scopes = ["rust"]
+groups = ["test"]           # groups this task belongs to, empty for a task that runs when nothing is named
 when = "all"                # condition expression, the task always runs when unset
 env_profile = "offline"
 env = { RUSTFLAGS = "-Dwarnings" }
@@ -138,6 +157,24 @@ commands = [
     { argv = ["xcodebuild", "test", "-destination", "id=${IOS_SIMULATOR_ID}"], cwd = "ios", pipe_through = ["xcbeautify"] },
 ]
 ```
+
+### Task groups
+
+Groups keep separate task sets in one task file, for example the checks and tests in `test`
+and the build and install steps in `install`.
+A task joins groups with `groups`, and a task can be in several groups.
+Tasks without `groups` run only when no group or task ID is named,
+so a task file without groups runs every enabled task by default.
+
+Positional arguments name groups or task IDs, so group names cannot match a task ID or a subcommand.
+`xtask install` runs the `install` group, and `xtask test cargo-fmt` runs the `test` group and `cargo-fmt`.
+Prerequisites in `deps` join the run whatever their group, while `after` only orders tasks that are both selected.
+`--scope` and `when` filter the tasks of the selected groups like any other task.
+
+The `jobs` and `fail_fast` of the selected groups, or of `default_group` when nothing is named,
+take precedence over `[settings]` and the user config, and `--jobs` and `--fail-fast` still override them.
+When several selected groups set `jobs`, the smallest applies.
+`--help` lists the groups with their help text and marks the default group.
 
 ### Variables
 
@@ -205,9 +242,10 @@ so plain `xtask` works in the project as well.
 - `lib.rs` - The `Runner` builder and the public API
 - `builtin.rs` - The `Builtin` trait for Rust tasks
 - `cli.rs` - Generic arguments, project flags added at runtime, and output mode detection
-- `config.rs` - Task file discovery, schema, and validation
+- `config.rs` - Task file discovery, schema, and validation, including the task groups
 - `condition.rs` - The boolean expression parser for `when` and `[conditions]`
 - `runner.rs` - Turning the task file into scheduled tasks, variable expansion, and exports
+- `selection.rs` - Splitting positional names into groups and task IDs, and choosing the tasks of a run
 - `scheduler.rs` - The parallel scheduler and the `TaskContext`
 - `process.rs` - Running commands with live output and per-task logs
 - `ui/` - The interactive progress view, the line output, and the end of run summary
