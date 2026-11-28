@@ -186,36 +186,36 @@ mod test_task_selection {
         [scopes.checks]
         includes = ["rust"]
 
-        [[tasks]]
-        id = "ungrouped"
+        [groups.test]
+        tasks = ["unit-tests", "web-tests"]
+
+        [groups.release]
+        tasks = ["build"]
+
+        [groups.install]
+        tasks = ["copy"]
+
+        [tasks.ungrouped]
         label = "Ungrouped"
         scopes = ["rust"]
         command = ["true"]
 
-        [[tasks]]
-        id = "unit-tests"
+        [tasks.unit-tests]
         label = "Unit tests"
-        groups = ["test"]
         scopes = ["rust"]
         command = ["true"]
 
-        [[tasks]]
-        id = "web-tests"
+        [tasks.web-tests]
         label = "Web tests"
-        groups = ["test"]
         scopes = ["web"]
         command = ["true"]
 
-        [[tasks]]
-        id = "build"
+        [tasks.build]
         label = "Build"
-        groups = ["release"]
         command = ["true"]
 
-        [[tasks]]
-        id = "copy"
+        [tasks.copy]
         label = "Copy"
-        groups = ["install"]
         deps = ["build"]
         command = ["true"]
     "#;

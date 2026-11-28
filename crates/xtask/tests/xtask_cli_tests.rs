@@ -423,30 +423,27 @@ const GROUPED_TASK_FILE: &str = r#"
 [settings]
 default_group = "test"
 
+[groups.test]
+tasks = ["unit-tests", "build"]
+
 [groups.install]
 help = "Build and install the binaries"
+tasks = ["build", "copy"]
 
-[[tasks]]
-id = "ungrouped"
+[tasks.ungrouped]
 label = "Ungrouped"
 command = ["true"]
 
-[[tasks]]
-id = "unit-tests"
+[tasks.unit-tests]
 label = "Unit tests"
-groups = ["test"]
 command = ["true"]
 
-[[tasks]]
-id = "build"
+[tasks.build]
 label = "Build"
-groups = ["test", "install"]
 command = ["true"]
 
-[[tasks]]
-id = "copy"
+[tasks.copy]
 label = "Copy"
-groups = ["install"]
 deps = ["build"]
 command = ["true"]
 "#;

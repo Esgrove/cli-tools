@@ -119,9 +119,10 @@ full-web = "web && !ci"
 [scopes.mobile]
 includes = ["ios", "android"]
 
-# Task groups. A group also exists without a table when a task names it in `groups`.
-[groups.install]
-help = "Build and install the binaries"
+# Task groups list the tasks they run, see "Task groups".
+[groups.checks]
+help = "Lints and the iOS tests"
+tasks = ["cargo-clippy", "ios-tests"]
 # Concurrency and fail fast when this group is selected, overriding [settings] but not --jobs
 jobs = 4
 fail_fast = true
@@ -131,15 +132,14 @@ fail_fast = true
 set = { SQLX_OFFLINE = "true" }
 remove = ["DATABASE_URL"]
 
-[[tasks]]
-id = "cargo-clippy"
+# Tasks are tables keyed by task ID, in task file order.
+[tasks.cargo-clippy]
 label = "Rust lints"
 priority = 2                # 1 runs first, larger values later (default: 5)
 deps = ["web-deps"]         # must be enabled and pass first
 after = ["cargo-fmt"]       # ordering that only applies when both tasks run
 locks = ["cargo-target"]    # no other task holding the same lock runs at the same time
 scopes = ["rust"]
-groups = ["test"]           # groups this task belongs to, empty for a task that runs when nothing is named
 when = "all"                # condition expression, the task always runs when unset
 env_profile = "offline"
 env = { RUSTFLAGS = "-Dwarnings" }
@@ -148,8 +148,7 @@ skip_if_missing = "cargo-clippy"
 notes = ["Shown at the end of the run when the task passes"]
 command = ["cargo", "clippy", "--workspace", "--all-targets"]
 
-[[tasks]]
-id = "ios-tests"
+[tasks.ios-tests]
 label = "iOS tests"
 when = "macos"
 commands = [
@@ -158,13 +157,47 @@ commands = [
 ]
 ```
 
+Tasks can also be written as a `[[tasks]]` array of tables, each with its own `id`.
+
 ### Task groups
 
 Groups keep separate task sets in one task file, for example the checks and tests in `test`
 and the build and install steps in `install`.
-A task joins groups with `groups`, and a task can be in several groups.
-Tasks without `groups` run only when no group or task ID is named,
+Each group lists the IDs of the tasks it runs in `tasks`, so the group shows what it runs.
+A task shared by several groups is listed in each of them.
+Tasks in no group run only when no group or task ID is named,
 so a task file without groups runs every enabled task by default.
+
+```toml
+[settings]
+default_group = "test"
+
+[groups.test]
+help = "Run the checks and tests"
+tasks = ["cargo-fmt", "cargo-build", "cargo-nextest"]
+
+[groups.install]
+help = "Build and install the binaries"
+tasks = ["cargo-build", "copy-binaries"]
+
+[tasks.cargo-fmt]
+label = "Formatting"
+command = ["cargo", "fmt", "--check"]
+
+[tasks.cargo-build]
+label = "Build"
+command = ["cargo", "build"]
+
+[tasks.cargo-nextest]
+label = "Tests"
+deps = ["cargo-build"]
+command = ["cargo", "nextest", "run"]
+
+[tasks.copy-binaries]
+label = "Copy the binaries"
+deps = ["cargo-build"]
+command = ["./copy-binaries.sh"]
+```
 
 Positional arguments name groups or task IDs, so group names cannot match a task ID or a subcommand.
 `xtask install` runs the `install` group, and `xtask test cargo-fmt` runs the `test` group and `cargo-fmt`.

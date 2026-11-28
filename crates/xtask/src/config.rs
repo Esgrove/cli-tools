@@ -76,8 +76,9 @@ pub struct TaskFile {
     /// Named sets of environment changes applied to tasks with `env_profile`.
     #[serde(default)]
     pub env_profiles: BTreeMap<String, EnvProfile>,
-    /// Ordered list of task definitions.
-    #[serde(default)]
+    /// Task definitions in task file order,
+    /// from `[tasks.<id>]` tables keyed by task ID or from a `[[tasks]]` array.
+    #[serde(default, deserialize_with = "deserialize_tasks")]
     pub tasks: Vec<TaskConfig>,
 }
 
@@ -130,7 +131,7 @@ pub struct ScopeConfig {
 
 /// One `[groups.<name>]` entry.
 ///
-/// A group also exists without a table when a task names it in `groups`.
+/// The group lists the IDs of the tasks it runs in `tasks`, and a task can be listed in several groups.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupConfig {
@@ -142,6 +143,9 @@ pub struct GroupConfig {
     /// Stop starting new tasks after the first failure when this group is selected.
     #[serde(default)]
     pub fail_fast: bool,
+    /// IDs of the tasks this group runs.
+    #[serde(default)]
+    pub tasks: Vec<String>,
 }
 
 /// One `[env_profiles.<name>]` entry.
@@ -160,7 +164,8 @@ pub struct EnvProfile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskConfig {
-    /// Unique identifier for this task.
+    /// Unique identifier for this task, the table key in the `[tasks.<id>]` form.
+    #[serde(default)]
     pub id: String,
     /// Human readable description shown in status lines.
     pub label: String,
@@ -179,8 +184,10 @@ pub struct TaskConfig {
     /// Scope tags for `--scope`.
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// Groups this task belongs to, empty for a task that runs when no group or task is named.
-    #[serde(default)]
+    /// Groups that list this task, empty for a task that runs when no group or task is named.
+    ///
+    /// Filled from the `tasks` lists of `[groups]` when the task file is parsed.
+    #[serde(skip)]
     pub groups: Vec<String>,
     /// Condition expression that must hold for this task to be included (default: always).
     pub when: Option<String>,
@@ -262,8 +269,11 @@ impl TaskFile {
     /// # Errors
     ///
     /// Returns an error for invalid TOML or unknown fields.
+    ///
     pub fn from_toml_str(raw: &str) -> Result<Self> {
-        Ok(toml::from_str(raw)?)
+        let mut task_file: Self = toml::from_str(raw)?;
+        task_file.assign_task_groups();
+        Ok(task_file)
     }
 
     /// Check flags, conditions, groups, environment profiles, and tasks for consistency.
@@ -329,21 +339,13 @@ impl TaskFile {
             .collect()
     }
 
-    /// Every group name that is declared in `[groups]` or used by a task.
+    /// Every group name declared in `[groups]`.
     #[must_use]
     pub fn known_groups(&self) -> BTreeSet<&str> {
-        self.groups
-            .keys()
-            .map(String::as_str)
-            .chain(
-                self.tasks
-                    .iter()
-                    .flat_map(|task| task.groups.iter().map(String::as_str)),
-            )
-            .collect()
+        self.groups.keys().map(String::as_str).collect()
     }
 
-    /// Settings of the named group, the defaults for a group without a `[groups]` table.
+    /// Settings of the named group, the defaults for an unknown group.
     #[must_use]
     pub fn group(&self, name: &str) -> GroupConfig {
         self.groups.get(name).cloned().unwrap_or_default()
@@ -540,6 +542,15 @@ impl TaskFile {
         Ok(())
     }
 
+    /// Record on each task the groups whose `tasks` list names it, in group name order.
+    fn assign_task_groups(&mut self) {
+        for (name, group) in &self.groups {
+            for task in self.tasks.iter_mut().filter(|task| group.tasks.contains(&task.id)) {
+                task.groups.push(name.clone());
+            }
+        }
+    }
+
     /// Check group names, their settings, and `default_group`.
     ///
     /// Group names share the positional arguments with task IDs, so they cannot match a task ID or a subcommand.
@@ -560,6 +571,11 @@ impl TaskFile {
         for (name, group) in &self.groups {
             if group.jobs == Some(0) {
                 bail!("groups.{name}.jobs must be at least 1");
+            }
+            for id in &group.tasks {
+                if !task_ids.contains(id.as_str()) {
+                    bail!("Group '{name}' lists unknown task '{id}'");
+                }
             }
         }
         if let Some(default_group) = &self.settings.default_group
@@ -660,6 +676,57 @@ pub fn find_task_file(start: &Path) -> Option<TaskFileLocation> {
         }
     }
     None
+}
+
+/// Read `tasks` from either `[tasks.<id>]` tables keyed by task ID or a `[[tasks]]` array of tables.
+///
+/// The keyed form keeps the task file order, since the TOML parser preserves table order.
+fn deserialize_tasks<'de, D>(deserializer: D) -> std::result::Result<Vec<TaskConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    /// Visitor accepting both the keyed table and the array form.
+    struct TasksVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TasksVisitor {
+        type Value = Vec<TaskConfig>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("[tasks.<id>] tables or a [[tasks]] array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut tasks = Vec::new();
+            while let Some(task) = sequence.next_element::<TaskConfig>()? {
+                tasks.push(task);
+            }
+            Ok(tasks)
+        }
+
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut tasks = Vec::new();
+            while let Some(id) = map.next_key::<String>()? {
+                let mut task: TaskConfig = map.next_value()?;
+                if !task.id.is_empty() && task.id != id {
+                    return Err(serde::de::Error::custom(format!(
+                        "task 'tasks.{id}' sets a different id '{}'",
+                        task.id
+                    )));
+                }
+                task.id = id;
+                tasks.push(task);
+            }
+            Ok(tasks)
+        }
+    }
+
+    deserializer.deserialize_any(TasksVisitor)
 }
 
 /// Default task scheduling priority when omitted from `xtask.toml`.
@@ -880,35 +947,91 @@ mod test_task_groups {
     }
 
     #[test]
-    fn accepts_groups_from_tables_and_tasks() {
+    fn groups_list_their_tasks_and_share_tasks() {
         let raw = r#"
             [settings]
             default_group = "test"
+
+            [groups.test]
+            tasks = ["fmt", "build"]
 
             [groups.install]
             help = "Install the binaries"
             jobs = 2
             fail_fast = true
+            tasks = ["build", "copy"]
 
-            [[tasks]]
-            id = "fmt"
+            [tasks.fmt]
             label = "Formatting"
-            groups = ["test", "ci"]
+            command = ["true"]
+
+            [tasks.build]
+            label = "Build"
+            command = ["true"]
+
+            [tasks.copy]
+            label = "Copy"
+            deps = ["build"]
+            command = ["true"]
+
+            [tasks.lint]
+            label = "Lint"
             command = ["true"]
         "#;
         let task_file = TaskFile::from_toml_str(raw).unwrap();
         task_file.validate(&BTreeSet::new()).unwrap();
+        let groups: Vec<(&str, Vec<&str>)> = task_file
+            .tasks
+            .iter()
+            .map(|task| (task.id.as_str(), task.groups.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("fmt", vec!["test"]),
+                ("build", vec!["install", "test"]),
+                ("copy", vec!["install"]),
+                ("lint", vec![]),
+            ]
+        );
         assert_eq!(
             task_file.known_groups().into_iter().collect::<Vec<_>>(),
-            ["ci", "install", "test"]
+            ["install", "test"]
         );
         assert_eq!(task_file.group("install").jobs, Some(2));
-        assert_eq!(task_file.group("ci").jobs, None);
+        assert_eq!(task_file.group("test").jobs, None);
+    }
+
+    #[test]
+    fn array_form_tasks_join_groups_too() {
+        let raw = "[groups.test]\ntasks = [\"a\"]\n[[tasks]]\nid = \"a\"\nlabel = \"A\"\ncommand = [\"true\"]";
+        let task_file = TaskFile::from_toml_str(raw).unwrap();
+        task_file.validate(&BTreeSet::new()).unwrap();
+        assert_eq!(task_file.tasks[0].groups, ["test"]);
+    }
+
+    #[test]
+    fn rejects_unknown_task_in_group_and_mismatched_keyed_id() {
+        let error = validate("[groups.test]\ntasks = [\"missing\"]").unwrap_err();
+        assert!(
+            error.to_string().contains("Group 'test' lists unknown task 'missing'"),
+            "{error}"
+        );
+        let mismatch = "[tasks.a]\nid = \"b\"\nlabel = \"A\"\ncommand = [\"true\"]";
+        assert!(TaskFile::from_toml_str(mismatch).is_err());
+        let matching = "[tasks.a]\nid = \"a\"\nlabel = \"A\"\ncommand = [\"true\"]";
+        assert!(validate(matching).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_and_groups_key_in_keyed_tasks() {
+        assert!(TaskFile::from_toml_str("[tasks.a]\nlabel = \"A\"\nwhen_any = [\"x\"]\ncommand = [\"true\"]").is_err());
+        assert!(TaskFile::from_toml_str("[tasks.a]\nlabel = \"A\"\ngroups = [\"x\"]\ncommand = [\"true\"]").is_err());
     }
 
     #[test]
     fn rejects_group_named_like_a_task_or_subcommand() {
-        let clash = "[[tasks]]\nid = \"fmt\"\nlabel = \"F\"\ngroups = [\"fmt\"]\ncommand = [\"true\"]";
+        let clash = "[groups.fmt]\n[tasks.fmt]\nlabel = \"F\"\ncommand = [\"true\"]";
         let error = validate(clash).unwrap_err();
         assert!(error.to_string().contains("same name as a task"), "{error}");
         assert!(validate("[groups.list]").is_err());

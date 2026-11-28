@@ -27,7 +27,7 @@ dunce = { workspace = true }
 indicatif = { workspace = true }
 jiff = { workspace = true }
 serde = { workspace = true }
-toml = { workspace = true }
+toml = { workspace = true, features = ["preserve_order"] }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

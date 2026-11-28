@@ -991,26 +991,23 @@ mod test_group_options {
 
         [groups.test]
         jobs = 4
+        tasks = ["fmt"]
 
         [groups.install]
         help = "Install the binaries"
         jobs = 2
         fail_fast = true
+        tasks = ["build"]
 
-        [[tasks]]
-        id = "fmt"
+        [tasks.fmt]
         label = "Formatting"
-        groups = ["test"]
         command = ["true"]
 
-        [[tasks]]
-        id = "build"
+        [tasks.build]
         label = "Build"
-        groups = ["install"]
         command = ["true"]
 
-        [[tasks]]
-        id = "lint"
+        [tasks.lint]
         label = "Lint"
         command = ["true"]
     "#;
