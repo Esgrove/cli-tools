@@ -16,6 +16,7 @@ cli-tools-common = { path = "crates/common" }
 cli-tools-db = { path = "crates/db" }
 cli-tools-dots = { path = "crates/dots" }
 cli-tools-media = { path = "crates/media" }
+cli-tools-version = { path = "crates/version" }
 filefind-common = { path = "crates/filefind-common" }
 
 anyhow = "1.0.105"

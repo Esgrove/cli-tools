@@ -788,6 +788,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli-tools-version"
+version = "13.0.0"
+dependencies = [
+ "jiff",
+]
+
+[[package]]
 name = "cli-tools-visaparse"
 version = "13.0.0"
 dependencies = [

@@ -1,0 +1,19 @@
+[package]
+name = "cli-tools-version"
+description = "Build metadata for the cli-tools binaries: version, git commit and branch, build time, and Rust version"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+jiff = { workspace = true }
+
+[lints]
+workspace = true
