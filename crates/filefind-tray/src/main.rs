@@ -48,7 +48,7 @@ pub enum TrayCommand {
     about,
     author,
     name = env!("CARGO_BIN_NAME"),
-    version,
+    version = cli_tools_version::VERSION_INFO,
 )]
 pub struct TrayArgs {
     /// Subcommand to run

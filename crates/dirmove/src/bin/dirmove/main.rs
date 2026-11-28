@@ -51,7 +51,7 @@ enum DirMoveCommand {
 
 /// Command-line arguments for the `dirmove` binary.
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
 struct DirMoveArgs {
     #[command(subcommand)]
     command: Option<DirMoveCommand>,

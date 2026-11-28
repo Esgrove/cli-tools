@@ -27,6 +27,7 @@ cli = [
     "dep:clap",
     "dep:clap_complete",
     "dep:cli-tools-db",
+    "dep:cli-tools-version",
     "dep:colored",
     "dep:filefind-common",
     "dep:indicatif",
@@ -47,6 +48,7 @@ walkdir = { workspace = true }
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 cli-tools-db = { workspace = true, optional = true }
+cli-tools-version = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
 filefind-common = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }

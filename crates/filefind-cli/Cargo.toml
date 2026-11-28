@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion"] }
 cli-tools-db = { workspace = true }
+cli-tools-version = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

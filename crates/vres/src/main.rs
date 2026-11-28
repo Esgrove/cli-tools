@@ -24,7 +24,7 @@ enum VideoResolutionCommand {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
 pub struct Args {
     #[command(subcommand)]
     command: Option<VideoResolutionCommand>,

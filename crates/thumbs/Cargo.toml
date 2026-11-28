@@ -20,6 +20,7 @@ clap_complete = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion", "config"] }
 cli-tools-db = { workspace = true }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
+cli-tools-version = { workspace = true }
 colored = { workspace = true }
 ctrlc = { workspace = true }
 rayon = { workspace = true }

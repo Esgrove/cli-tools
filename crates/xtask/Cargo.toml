@@ -21,6 +21,7 @@ anyhow = { workspace = true }
 clap = { workspace = true, features = ["string"] }
 clap_complete = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion", "config"] }
+cli-tools-version = { workspace = true }
 console = { workspace = true }
 dunce = { workspace = true }
 indicatif = { workspace = true }

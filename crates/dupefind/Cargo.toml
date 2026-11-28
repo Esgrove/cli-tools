@@ -35,6 +35,7 @@ walkdir = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion", "config", "diff"] }
 cli-tools-db = { workspace = true }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
+cli-tools-version = { workspace = true }
 filefind-common = { workspace = true }
 
 [dev-dependencies]

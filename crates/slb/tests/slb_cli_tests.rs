@@ -804,7 +804,15 @@ fn the_version_flag_prints_the_version() {
     let output = run(&["--version"]);
 
     assert_eq!(exit_code(&output), 0);
-    assert!(stdout(&output).contains(env!("CARGO_PKG_VERSION")));
+    assert_eq!(stdout(&output), format!("slb {}\n", cli_tools_version::VERSION_INFO));
+}
+
+#[test]
+fn the_short_version_flag_prints_the_build_metadata() {
+    let output = run(&["-V"]);
+
+    assert_eq!(exit_code(&output), 0);
+    assert_eq!(stdout(&output), format!("slb {}\n", cli_tools_version::VERSION_INFO));
 }
 
 #[cfg(not(windows))]

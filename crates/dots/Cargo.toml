@@ -24,12 +24,14 @@ cli = [
     "cli-tools-common/completion",
     "dep:clap",
     "dep:clap_complete",
+    "dep:cli-tools-version",
     "dep:filefind-common",
 ]
 
 [dependencies]
 anyhow = { workspace = true }
 cli-tools-common = { workspace = true, features = ["config", "diff"] }
+cli-tools-version = { workspace = true, optional = true }
 colored = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }

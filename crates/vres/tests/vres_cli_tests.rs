@@ -84,3 +84,17 @@ fn renames_move_the_entries_of_an_existing_filefind_index() {
     assert!(tree.exists("videos/other.1080p.mp4"));
     assert_eq!(index.indexed_paths(), vec!["movie.1080p.mp4"]);
 }
+
+#[test]
+fn version_flag_prints_the_build_metadata() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vres"))
+        .arg("-V")
+        .output()
+        .expect("vres should start and exit");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("vres {}\n", cli_tools_version::VERSION_INFO)
+    );
+}

@@ -30,12 +30,14 @@ cli = [
     "cli-tools-common/diff",
     "dep:clap",
     "dep:clap_complete",
+    "dep:cli-tools-version",
     "dep:colored",
 ]
 
 [dependencies]
 anyhow = { workspace = true }
 cli-tools-common = { workspace = true }
+cli-tools-version = { workspace = true, optional = true }
 dunce = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }

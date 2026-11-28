@@ -58,7 +58,7 @@ enum Command {
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
 struct DotsCli {
     #[command(subcommand)]
     command: Option<Command>,

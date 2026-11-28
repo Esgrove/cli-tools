@@ -28,7 +28,7 @@ enum ThumbnailCommand {
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create thumbnail sheets for video files using ffmpeg")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Create thumbnail sheets for video files using ffmpeg")]
 pub(crate) struct ThumbnailArgs {
     #[command(subcommand)]
     command: Option<ThumbnailCommand>,

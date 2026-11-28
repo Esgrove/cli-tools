@@ -30,7 +30,7 @@ enum VideoConvertCommand {
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg hardware acceleration")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg hardware acceleration")]
 pub(crate) struct VideoConvertArgs {
     #[command(subcommand)]
     command: Option<VideoConvertCommand>,

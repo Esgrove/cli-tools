@@ -21,7 +21,7 @@ enum DupeFindCommand {
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Find duplicate video files based on identifier patterns")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Find duplicate video files based on identifier patterns")]
 struct Args {
     #[command(subcommand)]
     command: Option<DupeFindCommand>,

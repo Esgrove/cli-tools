@@ -30,6 +30,7 @@ toml = { workspace = true }
 walkdir = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion", "config", "diff"] }
 cli-tools-db = { workspace = true }
+cli-tools-version = { workspace = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

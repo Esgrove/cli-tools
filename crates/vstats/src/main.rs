@@ -26,7 +26,7 @@ enum VideoStatsCommand {
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Collect and print video file statistics")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Collect and print video file statistics")]
 pub(crate) struct VideoStatsArgs {
     #[command(subcommand)]
     command: Option<VideoStatsCommand>,

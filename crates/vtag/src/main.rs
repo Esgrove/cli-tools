@@ -49,7 +49,7 @@ enum ProjectType {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a project (CMake, Python, Rust)")]
+#[command(author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a project (CMake, Python, Rust)")]
 struct Args {
     #[command(subcommand)]
     command: Option<VersionTagCommand>,

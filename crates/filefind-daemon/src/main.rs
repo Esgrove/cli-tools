@@ -98,7 +98,7 @@ enum Command {
 
 /// Background file indexing daemon for filefind
 #[derive(Parser)]
-#[command(about, author, version, name = env!("CARGO_BIN_NAME"))]
+#[command(about, author, version = cli_tools_version::VERSION_INFO, name = env!("CARGO_BIN_NAME"))]
 struct DaemonCli {
     /// Subcommand to execute
     #[command(subcommand)]

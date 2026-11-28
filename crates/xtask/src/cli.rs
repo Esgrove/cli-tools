@@ -79,7 +79,7 @@ pub enum ColorMode {
 #[derive(Debug, Parser)]
 #[command(
     name = "xtask",
-    version,
+    version = cli_tools_version::VERSION_INFO,
     about = "Run a project's tasks from xtask.toml in parallel",
     long_about = "Run a project's tasks from xtask.toml in parallel.\n\n\
         The task file is searched for in the current directory and its parents up to the git repository root. \

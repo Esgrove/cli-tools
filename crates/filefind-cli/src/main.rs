@@ -26,7 +26,7 @@ use crate::config::CliConfig;
 #[derive(Parser)]
 #[command(
     author,
-    version,
+    version = cli_tools_version::VERSION_INFO,
     name = env!("CARGO_BIN_NAME"),
     about
 )]
