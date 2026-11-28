@@ -978,10 +978,15 @@ Options:
 
 ### Required Tools
 
+`./setup-dev.sh` updates the Rust toolchains with `rustup update` and installs the development tools.
+It installs or upgrades cargo-edit, cargo-fuzz, cargo-llvm-cov, cargo-nextest, and slb with `cargo install --locked`,
+adds the nightly toolchain and the LLVM tools, installs the git hooks with prek,
+and on macOS installs bun, ffmpeg, jq, prek, shellcheck, shfmt, and uv with Homebrew when they are missing.
+
 ```shell
-cargo install --locked cargo-nextest
-cargo install --locked cargo-llvm-cov
-cargo install --locked cargo-edit
+./setup-dev.sh
+# Show the commands without running them
+./setup-dev.sh --dryrun
 ```
 
 ### Testing

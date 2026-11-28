@@ -114,12 +114,11 @@ cargo bench --workspace --bench '*' -- --baseline before
 
 ### Required tools
 
-Install these tools for testing:
+Update the Rust toolchains and install the cargo tools, the nightly toolchain, slb, the git hooks,
+and on macOS the missing Homebrew tools such as jq, shfmt, and shellcheck with:
 
 ```shell
-cargo install cargo-nextest
-cargo install cargo-llvm-cov
-cargo install cargo-edit
+./setup-dev.sh
 ```
 
 ## Benchmarks
