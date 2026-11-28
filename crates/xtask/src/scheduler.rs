@@ -358,7 +358,7 @@ pub fn run_schedule(
     ctx: &TaskContext,
     max_jobs: usize,
     fail_fast: bool,
-    scope_label: &str,
+    selection_label: &str,
 ) -> Result<RunSummary> {
     validate_graph(&tasks)?;
     if !ctx.dry_run {
@@ -367,7 +367,7 @@ pub fn run_schedule(
 
     let max_workers = max_jobs.max(1);
     let wall_start = Instant::now();
-    ctx.reporter.on_plan(tasks.len(), max_workers, scope_label);
+    ctx.reporter.on_plan(tasks.len(), max_workers, selection_label);
 
     let scheduled: BTreeSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
     let mut order = Vec::with_capacity(tasks.len());

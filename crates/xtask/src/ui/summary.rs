@@ -223,7 +223,7 @@ mod test_summary {
         reporter.finish_and_print_summary(&summary, &repo_root, false);
 
         let rendered = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
-        assert!(rendered.contains("PLAN  3 task(s) (jobs=4, scope=rust)"));
+        assert!(rendered.contains("PLAN  3 task(s) for rust (jobs=4)"));
         assert!(rendered.contains("WAIT  still running (2): cargo-clippy"));
         assert!(rendered.contains("CMD   cargo-clippy                 $ cargo clippy --workspace"));
         assert!(rendered.contains("::error title=cargo-clippy::Command exited with status 101%0Adetails"));

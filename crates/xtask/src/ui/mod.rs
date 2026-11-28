@@ -370,7 +370,7 @@ impl Reporter {
     }
 
     /// Announce the resolved execution plan before workers begin.
-    pub fn on_plan(&self, total_tasks: usize, jobs: usize, scope: &str) {
+    pub fn on_plan(&self, total_tasks: usize, jobs: usize, selection: &str) {
         let mut guard = self.lock_inner();
         let active_len = guard.active.len();
         match &mut guard.backend {
@@ -383,7 +383,7 @@ impl Reporter {
             }
             ReporterBackend::Line(target) => {
                 let prefix = self.line_prefix(&self.palette.info, "PLAN ");
-                target.write_line(&format!("{prefix} {total_tasks} task(s) (jobs={jobs}, scope={scope})"));
+                target.write_line(&format!("{prefix} {total_tasks} task(s) for {selection} (jobs={jobs})"));
             }
         }
     }
