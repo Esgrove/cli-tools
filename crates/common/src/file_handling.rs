@@ -383,6 +383,10 @@ pub fn remove_empty_directories(root: &Path) -> io::Result<usize> {
 ///
 /// The new contents go to a temporary file next to the target, which takes the permissions of the target
 /// and is then renamed over it, so an interrupted write leaves the original file as it was.
+/// The temporary file is not synced to disk before the rename,
+/// since the rename alone protects against interrupted runs.
+/// On macOS a sync is a full device flush that takes milliseconds per file,
+/// which would dominate the run time of tools that rewrite thousands of files.
 /// A symbolic link is resolved first, so the file it points to is updated and the link stays a link.
 ///
 /// # Errors
@@ -400,7 +404,6 @@ pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<(
     let (mut temp_file, temporary) = create_unique_sibling_file(&target, "tmp", target_permissions.as_ref())?;
     let result = (|| {
         temp_file.write_all(contents.as_ref())?;
-        temp_file.sync_data()?;
         drop(temp_file);
         if let Some(ref permissions) = target_permissions {
             #[cfg(windows)]
