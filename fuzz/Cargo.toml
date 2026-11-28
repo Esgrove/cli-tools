@@ -18,7 +18,7 @@ clap = "4.6.10"
 cli-tools-common = { path = "../crates/common" }
 cli-tools-dots = { path = "../crates/dots" }
 cli-tools-slb = { path = "../crates/slb" }
-libfuzzer-sys = "0.4.10"
+libfuzzer-sys = "0.4.13"
 
 [[bin]]
 name = "slb_format"

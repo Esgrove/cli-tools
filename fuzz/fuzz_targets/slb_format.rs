@@ -46,7 +46,10 @@ fuzz_target!(|data: &[u8]| {
     let once = formatted.fixed_text.unwrap_or_else(|| text.to_string());
     let twice = format(&once, kind, &options).fixed_text.unwrap_or_else(|| once.clone());
     let third = format(&twice, kind, &options);
-    assert_eq!(third.fixed_text, None, "formatting {text:?} did not settle within two runs");
+    assert_eq!(
+        third.fixed_text, None,
+        "formatting {text:?} did not settle within two runs"
+    );
     assert!(
         third.violations.iter().all(|violation| !violation.fixable),
         "fixable violations remain after formatting {text:?}"
