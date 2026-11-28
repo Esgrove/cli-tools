@@ -1,0 +1,89 @@
+# Tasks of this repository for the xtask runner in crates/xtask, see crates/xtask/README.md.
+# Plain `xtask` runs the test group, and `xtask install` builds and installs every binary.
+
+[settings]
+default_group = "test"
+
+[flags.no-lint]
+short = "l"
+help = "Skip clippy"
+
+[flags.no-fuzz]
+short = "n"
+help = "Skip fuzzing"
+
+[groups.test]
+help = "Check formatting, run clippy, all workspace tests, and every fuzz target"
+
+[groups.install]
+help = "Build every binary in one release build and copy them to the Cargo bin directory"
+
+[[tasks]]
+id = "cargo-fmt"
+label = "Rust formatting"
+groups = ["test"]
+priority = 1
+command = ["cargo", "fmt", "--all", "--check"]
+
+# The cargo tasks share the workspace target directory, where cargo would make them wait on its build lock anyway.
+[[tasks]]
+id = "cargo-clippy"
+label = "Clippy"
+groups = ["test"]
+when = "!no-lint"
+priority = 2
+locks = ["cargo-target"]
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--", "-Dwarnings"]
+
+[[tasks]]
+id = "cargo-nextest"
+label = "Unit, integration, CLI, and property tests"
+groups = ["test"]
+priority = 3
+locks = ["cargo-target"]
+require_commands = [
+    "cargo",
+    { name = "cargo-nextest", hint = "Install it with: cargo install --locked cargo-nextest" },
+]
+command = ["cargo", "nextest", "run", "--workspace"]
+
+[[tasks]]
+id = "doc-tests"
+label = "Doc tests"
+groups = ["test"]
+priority = 4
+locks = ["cargo-target"]
+command = ["cargo", "test", "--workspace", "--doc"]
+
+# The fuzz crate is its own workspace with its own target directory, so it runs next to the cargo tasks.
+# FUZZ_SECONDS and FUZZ_REQUIRED from the environment set the time per target and whether a missing toolchain fails.
+[[tasks]]
+id = "fuzz"
+label = "Fuzz targets"
+groups = ["test"]
+when = "!no-fuzz"
+priority = 1
+command = ["bash", "fuzz.sh"]
+
+# One build lets cargo compile the shared dependencies once and run the long LTO links of the binaries in parallel.
+[[tasks]]
+id = "cargo-build-release"
+label = "Release build of every binary"
+groups = ["install"]
+priority = 1
+locks = ["cargo-target"]
+command = ["cargo", "build", "--release", "--locked", "--workspace", "--bins"]
+
+[[tasks]]
+id = "copy-binaries"
+label = "Copy the binaries to the Cargo bin directory"
+groups = ["install"]
+deps = ["cargo-build-release"]
+command = ["bash", "copy-binaries.sh"]
+
+[[tasks]]
+id = "shell-completions"
+label = "Shell completions"
+groups = ["install"]
+deps = ["copy-binaries"]
+command = ["bash", "completions.sh", "--silent"]
