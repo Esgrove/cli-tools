@@ -20,6 +20,17 @@ struct ChildGuard {
     child: Option<Child>,
 }
 
+/// Isolated test environment with private config, database, socket, and two separate roots.
+struct DaemonSandbox {
+    /// Short private directory under `/tmp` so Unix domain socket paths stay well under 104 bytes on macOS.
+    runtime_dir: TempDir,
+    root_a: TempTree,
+    root_b: TempTree,
+    config_path: PathBuf,
+    database_path: PathBuf,
+    socket_path: PathBuf,
+}
+
 impl ChildGuard {
     /// Wrap a spawned child process for automatic cleanup.
     const fn new(child: Child) -> Self {
@@ -50,17 +61,6 @@ impl Drop for ChildGuard {
             let _ = child.wait();
         }
     }
-}
-
-/// Isolated test environment with private config, database, socket, and two separate roots.
-struct DaemonSandbox {
-    /// Short private directory under `/tmp` so Unix domain socket paths stay well under 104 bytes on macOS.
-    runtime_dir: TempDir,
-    root_a: TempTree,
-    root_b: TempTree,
-    config_path: PathBuf,
-    database_path: PathBuf,
-    socket_path: PathBuf,
 }
 
 impl DaemonSandbox {

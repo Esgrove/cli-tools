@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn test_extract_volume_key_non_ascii_prefix() {
-        // A multibyte first character used to panic when slicing the first two bytes
+        // Multibyte first characters must not be sliced at a fixed two-byte offset.
         assert_eq!(extract_volume_key("日:\\file.txt"), "UNKNOWN");
         assert_eq!(extract_volume_key("é:\\file.txt"), "UNKNOWN");
         assert_eq!(extract_volume_key("1:\\file.txt"), "UNKNOWN");

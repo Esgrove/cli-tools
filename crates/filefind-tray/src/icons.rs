@@ -37,22 +37,22 @@ pub fn create_scanning_icon() -> Result<Icon> {
 
 /// Generate RGBA data for the default icon (blue file icon).
 fn create_default_icon_rgba() -> Vec<u8> {
-    create_icon_with_color(0x42, 0x85, 0xF4, 0xFF) // Blue
+    create_icon_with_color(0x42, 0x85, 0xF4, 0xFF)
 }
 
 /// Generate RGBA data for the running icon (green).
 fn create_running_icon_rgba() -> Vec<u8> {
-    create_icon_with_color(0x34, 0xA8, 0x53, 0xFF) // Green
+    create_icon_with_color(0x34, 0xA8, 0x53, 0xFF)
 }
 
 /// Generate RGBA data for the stopped icon (gray).
 fn create_stopped_icon_rgba() -> Vec<u8> {
-    create_icon_with_color(0x9A, 0x9A, 0x9A, 0xFF) // Gray
+    create_icon_with_color(0x9A, 0x9A, 0x9A, 0xFF)
 }
 
 /// Generate RGBA data for the scanning icon (orange/yellow).
 fn create_scanning_icon_rgba() -> Vec<u8> {
-    create_icon_with_color(0xFB, 0xBC, 0x05, 0xFF) // Orange/Yellow
+    create_icon_with_color(0xFB, 0xBC, 0x05, 0xFF)
 }
 
 /// Create an icon with a simple file/magnifying glass design in the specified color.

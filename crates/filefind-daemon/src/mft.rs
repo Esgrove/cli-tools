@@ -48,8 +48,9 @@ const MFT_BUFFER_SIZE: usize = 64 * 1024;
 /// Path patterns that should never be indexed.
 #[cfg_attr(not(windows), allow(dead_code))]
 const IGNORED_PATH_PATTERNS: &[&str] = &[
-    "$Recycle", // Windows Recycle Bin
-    "#Recycle", // NAS Recycle Bin
+    // Windows Recycle Bin
+    "$Recycle", // NAS Recycle Bin
+    "#Recycle",
 ];
 
 /// File attribute flag for directories.
@@ -124,7 +125,8 @@ impl MftScanner {
         let volume_handle = unsafe {
             CreateFileW(
                 PCWSTR(volume_path.as_ptr()),
-                0x8000_0000, // GENERIC_READ
+                // GENERIC_READ
+                0x8000_0000,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
@@ -146,39 +148,6 @@ impl MftScanner {
     #[cfg(not(windows))]
     pub fn new(_drive_letter: char) -> Result<Self> {
         bail!("MFT scanning is only supported on Windows");
-    }
-
-    /// Check if a volume is NTFS formatted.
-    #[cfg(windows)]
-    fn is_ntfs_volume(drive_letter: char) -> Result<bool> {
-        let root_path: Vec<u16> = format!("{drive_letter}:\\")
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut fs_name_buffer = [0u16; 256];
-
-        let success = unsafe {
-            GetVolumeInformationW(
-                PCWSTR(root_path.as_ptr()),
-                None,
-                None,
-                None,
-                None,
-                Some(&mut fs_name_buffer),
-            )
-            .is_ok()
-        };
-
-        if !success {
-            bail!("Failed to get volume information for {drive_letter}:\\");
-        }
-
-        let fs_name = String::from_utf16_lossy(&fs_name_buffer)
-            .trim_end_matches('\0')
-            .to_uppercase();
-
-        Ok(fs_name == "NTFS")
     }
 
     /// Scan the MFT and return all file entries.
@@ -274,6 +243,89 @@ impl MftScanner {
     #[cfg(not(windows))]
     pub fn scan_filtered(&self, _path_filters: &[String]) -> Result<Vec<FileEntry>> {
         bail!("MFT scanning is only supported on Windows");
+    }
+
+    /// Get volume information for the scanned drive.
+    #[cfg(windows)]
+    pub fn get_volume_info(&self) -> Result<IndexedVolume> {
+        let root_path: Vec<u16> = format!("{}:\\", self.drive_letter)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut volume_name_buffer = [0u16; 256];
+        let mut serial_number: u32 = 0;
+
+        let success = unsafe {
+            GetVolumeInformationW(
+                PCWSTR(root_path.as_ptr()),
+                Some(&mut volume_name_buffer),
+                Some(&raw mut serial_number),
+                None,
+                None,
+                None,
+            )
+            .is_ok()
+        };
+
+        if !success {
+            bail!("Failed to get volume information for {}:\\", self.drive_letter);
+        }
+
+        let label = String::from_utf16_lossy(&volume_name_buffer)
+            .trim_end_matches('\0')
+            .to_string();
+
+        Ok(IndexedVolume {
+            id: None,
+            serial_number: format!("{serial_number:08X}"),
+            label: if label.is_empty() { None } else { Some(label) },
+            mount_point: format!("{}:", self.drive_letter),
+            volume_type: VolumeType::Ntfs,
+            is_online: true,
+            last_scan_time: Some(SystemTime::now()),
+            last_usn: None,
+        })
+    }
+
+    /// Get volume information (non-Windows stub).
+    #[expect(clippy::unused_self, reason = "signature mirrors the Windows implementation")]
+    #[cfg(not(windows))]
+    pub fn get_volume_info(&self) -> Result<IndexedVolume> {
+        bail!("MFT scanning is only supported on Windows");
+    }
+
+    /// Check if a volume is NTFS formatted.
+    #[cfg(windows)]
+    fn is_ntfs_volume(drive_letter: char) -> Result<bool> {
+        let root_path: Vec<u16> = format!("{drive_letter}:\\")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut fs_name_buffer = [0u16; 256];
+
+        let success = unsafe {
+            GetVolumeInformationW(
+                PCWSTR(root_path.as_ptr()),
+                None,
+                None,
+                None,
+                None,
+                Some(&mut fs_name_buffer),
+            )
+            .is_ok()
+        };
+
+        if !success {
+            bail!("Failed to get volume information for {drive_letter}:\\");
+        }
+
+        let fs_name = String::from_utf16_lossy(&fs_name_buffer)
+            .trim_end_matches('\0')
+            .to_uppercase();
+
+        Ok(fs_name == "NTFS")
     }
 
     /// Get NTFS volume data structure.
@@ -432,7 +484,8 @@ impl MftScanner {
             parent_reference,
             name,
             attributes: file_attributes,
-            size: 0, // Size not available in USN record
+            // Size is not available in the USN record.
+            size: 0,
             is_directory,
         })
     }
@@ -563,56 +616,6 @@ impl MftScanner {
 
         path_parts.reverse();
         format!("{}:\\{}", self.drive_letter, path_parts.join("\\"))
-    }
-
-    /// Get volume information for the scanned drive.
-    #[cfg(windows)]
-    pub fn get_volume_info(&self) -> Result<IndexedVolume> {
-        let root_path: Vec<u16> = format!("{}:\\", self.drive_letter)
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut volume_name_buffer = [0u16; 256];
-        let mut serial_number: u32 = 0;
-
-        let success = unsafe {
-            GetVolumeInformationW(
-                PCWSTR(root_path.as_ptr()),
-                Some(&mut volume_name_buffer),
-                Some(&raw mut serial_number),
-                None,
-                None,
-                None,
-            )
-            .is_ok()
-        };
-
-        if !success {
-            bail!("Failed to get volume information for {}:\\", self.drive_letter);
-        }
-
-        let label = String::from_utf16_lossy(&volume_name_buffer)
-            .trim_end_matches('\0')
-            .to_string();
-
-        Ok(IndexedVolume {
-            id: None,
-            serial_number: format!("{serial_number:08X}"),
-            label: if label.is_empty() { None } else { Some(label) },
-            mount_point: format!("{}:", self.drive_letter),
-            volume_type: VolumeType::Ntfs,
-            is_online: true,
-            last_scan_time: Some(SystemTime::now()),
-            last_usn: None,
-        })
-    }
-
-    /// Get volume information (non-Windows stub).
-    #[expect(clippy::unused_self, reason = "signature mirrors the Windows implementation")]
-    #[cfg(not(windows))]
-    pub fn get_volume_info(&self) -> Result<IndexedVolume> {
-        bail!("MFT scanning is only supported on Windows");
     }
 }
 
@@ -1691,7 +1694,7 @@ mod tests {
 
     #[test]
     fn test_parse_mft_buffer_bytes_returned_greater_than_buffer() {
-        // A bytes_returned larger than the buffer used to slice past the end and panic
+        // A bytes_returned larger than the buffer must be clamped instead of slicing past the end.
         let record = build_aligned_v2_record(100, 5, 0x20, "file.txt");
         let buffer = build_mft_enum_buffer(200, std::slice::from_ref(&record));
 

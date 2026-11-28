@@ -88,8 +88,10 @@ pub fn list_volumes(database: &Database, sort_by: VolumeSortBy) -> Result<()> {
         .fold((0, 0, 0, 0, 0), |(mount, vtype, status, files, size), vol| {
             (
                 mount.max(vol.mount_label.len()),
-                vtype.max(vol.volume_type.len() + 2), // +2 for brackets
-                status.max(vol.status.len() + 2),     // +2 for parentheses
+                // Include 2 characters for the surrounding brackets.
+                vtype.max(vol.volume_type.len() + 2),
+                // Include 2 characters for the surrounding parentheses.
+                status.max(vol.status.len() + 2),
                 files.max(vol.file_count.to_string().len()),
                 size.max(vol.size_formatted.len()),
             )

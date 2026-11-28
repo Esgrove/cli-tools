@@ -42,6 +42,54 @@ pub static DATABASE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
         .join(format!("{PROJECT_NAME}.db"))
 });
 
+/// Output format for search results.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    /// Simple list of paths without type or size information.
+    #[serde(alias = "simple")]
+    List,
+    /// File names only, without full path.
+    Name,
+    /// Files grouped by directory (default).
+    #[default]
+    Grouped,
+    /// Detailed info with size.
+    Info,
+}
+
+/// When to emit OSC 8 terminal hyperlinks for result paths.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "clap", derive(ValueEnum))]
+#[serde(rename_all = "lowercase")]
+pub enum HyperlinkMode {
+    /// Emit hyperlinks only when the output goes to a terminal known to support OSC 8 (default).
+    #[default]
+    Auto,
+    /// Always emit hyperlinks, even when the output is redirected.
+    Always,
+    /// Never emit hyperlinks.
+    Never,
+}
+
+/// Log level for the daemon.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[cfg_attr(feature = "clap", derive(ValueEnum))]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Error messages only.
+    Error,
+    /// Warnings and errors.
+    Warn,
+    /// Informational messages.
+    #[default]
+    Info,
+    /// Debug messages.
+    Debug,
+    /// Trace messages.
+    Trace,
+}
+
 /// Root configuration structure that wraps all sections.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct UserConfig {
@@ -161,52 +209,52 @@ pub struct PathMapping {
     pub drive: String,
 }
 
-/// Output format for search results.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    /// Simple list of paths without type or size information.
-    #[serde(alias = "simple")]
-    List,
-    /// File names only, without full path.
-    Name,
-    /// Files grouped by directory (default).
-    #[default]
-    Grouped,
-    /// Detailed info with size.
-    Info,
+impl std::fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::List => write!(f, "list"),
+            Self::Name => write!(f, "name"),
+            Self::Grouped => write!(f, "grouped"),
+            Self::Info => write!(f, "info"),
+        }
+    }
 }
 
-/// When to emit OSC 8 terminal hyperlinks for result paths.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "clap", derive(ValueEnum))]
-#[serde(rename_all = "lowercase")]
-pub enum HyperlinkMode {
-    /// Emit hyperlinks only when the output goes to a terminal known to support OSC 8 (default).
-    #[default]
-    Auto,
-    /// Always emit hyperlinks, even when the output is redirected.
-    Always,
-    /// Never emit hyperlinks.
-    Never,
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "list" | "simple" => Ok(Self::List),
+            "name" => Ok(Self::Name),
+            "grouped" => Ok(Self::Grouped),
+            "info" => Ok(Self::Info),
+            _ => Err(format!("Unknown output format: {s}")),
+        }
+    }
 }
 
-/// Log level for the daemon.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[cfg_attr(feature = "clap", derive(ValueEnum))]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevel {
-    /// Error messages only.
-    Error,
-    /// Warnings and errors.
-    Warn,
-    /// Informational messages
-    #[default]
-    Info,
-    /// Debug messages.
-    Debug,
-    /// Trace messages
-    Trace,
+impl std::fmt::Display for HyperlinkMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Always => write!(f, "always"),
+            Self::Never => write!(f, "never"),
+        }
+    }
+}
+
+impl std::str::FromStr for HyperlinkMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            _ => Err(format!("Unknown hyperlink mode: {s}")),
+        }
+    }
 }
 
 impl LogLevel {
@@ -232,6 +280,34 @@ impl LogLevel {
             Self::Info => LevelFilter::INFO,
             Self::Debug => LevelFilter::DEBUG,
             Self::Trace => LevelFilter::TRACE,
+        }
+    }
+}
+
+#[cfg(feature = "logging")]
+impl From<LogLevel> for LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        level.to_level_filter()
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_filter_str())
+    }
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "error" => Ok(Self::Error),
+            "warn" | "warning" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(format!("Unknown log level: {s}")),
         }
     }
 }
@@ -312,50 +388,6 @@ impl UserConfig {
     }
 }
 
-impl fmt::Display for PathMapping {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} -> {}", self.unc, self.drive)
-    }
-}
-
-impl<'de> Deserialize<'de> for PathMapping {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let [unc, drive] = <[String; 2]>::deserialize(deserializer)?;
-        Ok(Self { unc, drive })
-    }
-}
-
-#[cfg(feature = "logging")]
-impl From<LogLevel> for LevelFilter {
-    fn from(level: LogLevel) -> Self {
-        level.to_level_filter()
-    }
-}
-
-impl std::fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_filter_str())
-    }
-}
-
-impl std::str::FromStr for LogLevel {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "error" => Ok(Self::Error),
-            "warn" | "warning" => Ok(Self::Warn),
-            "info" => Ok(Self::Info),
-            "debug" => Ok(Self::Debug),
-            "trace" => Ok(Self::Trace),
-            _ => Err(format!("Unknown log level: {s}")),
-        }
-    }
-}
-
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
@@ -390,70 +422,43 @@ impl Default for CliConfig {
     }
 }
 
-impl std::fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::List => write!(f, "list"),
-            Self::Name => write!(f, "name"),
-            Self::Grouped => write!(f, "grouped"),
-            Self::Info => write!(f, "info"),
-        }
+impl fmt::Display for PathMapping {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> {}", self.unc, self.drive)
     }
 }
 
-impl std::str::FromStr for OutputFormat {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "list" | "simple" => Ok(Self::List),
-            "name" => Ok(Self::Name),
-            "grouped" => Ok(Self::Grouped),
-            "info" => Ok(Self::Info),
-            _ => Err(format!("Unknown output format: {s}")),
-        }
+impl<'de> Deserialize<'de> for PathMapping {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let [unc, drive] = <[String; 2]>::deserialize(deserializer)?;
+        Ok(Self { unc, drive })
     }
 }
 
-impl std::fmt::Display for HyperlinkMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Auto => write!(f, "auto"),
-            Self::Always => write!(f, "always"),
-            Self::Never => write!(f, "never"),
-        }
-    }
-}
-
-impl std::str::FromStr for HyperlinkMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "always" => Ok(Self::Always),
-            "never" => Ok(Self::Never),
-            _ => Err(format!("Unknown hyperlink mode: {s}")),
-        }
-    }
-}
-
+/// Default rescan interval in seconds for non-NTFS volumes.
 const fn default_scan_interval_seconds() -> u64 {
     3600
 }
 
+/// Default output format for search results.
 const fn default_format() -> OutputFormat {
     OutputFormat::Grouped
 }
 
+/// Default maximum number of results to display.
 const fn default_max_results() -> usize {
     100
 }
 
+/// Default boolean value for config flags that default to enabled.
 const fn default_true() -> bool {
     true
 }
 
+/// Default URI scheme for terminal hyperlinks.
 fn default_hyperlink_scheme() -> String {
     String::from("file")
 }

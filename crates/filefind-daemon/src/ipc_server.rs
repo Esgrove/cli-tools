@@ -47,6 +47,21 @@ use windows::Win32::System::Pipes::{
 
 use filefind_common::{DaemonCommand, DaemonResponse, DaemonStateInfo, DaemonStatus, Database, get_ipc_path};
 
+/// Commands that can be sent to the daemon from the IPC server.
+#[derive(Debug)]
+pub enum IpcToDaemon {
+    /// Request to stop the daemon.
+    Stop,
+    /// Request to rescan.
+    Rescan,
+    /// Request to pause indexing.
+    Pause,
+    /// Request to resume indexing.
+    Resume,
+    /// Request to prune missing entries from the database.
+    Prune,
+}
+
 /// Bound Unix domain socket paired with the exclusive lock file that owns it for the daemon lifetime.
 #[cfg(not(windows))]
 struct BoundUnixSocket {
@@ -85,21 +100,6 @@ pub struct IpcServer {
     shutdown: Arc<AtomicBool>,
     /// Custom pipe/socket path. When `None`, uses the default from [`get_ipc_path`].
     pipe_path: Option<PathBuf>,
-}
-
-/// Commands that can be sent to the daemon from the IPC server.
-#[derive(Debug)]
-pub enum IpcToDaemon {
-    /// Request to stop the daemon.
-    Stop,
-    /// Request to rescan.
-    Rescan,
-    /// Request to pause indexing.
-    Pause,
-    /// Request to resume indexing.
-    Resume,
-    /// Request to prune missing entries from the database.
-    Prune,
 }
 
 impl AtomicDaemonState {
@@ -214,13 +214,6 @@ impl IpcServer {
         self
     }
 
-    /// Get the effective pipe/socket path.
-    ///
-    /// Returns the custom path if set, otherwise the default from [`get_ipc_path`].
-    fn effective_pipe_path(&self) -> &Path {
-        self.pipe_path.as_deref().unwrap_or_else(|| get_ipc_path().as_path())
-    }
-
     /// Start the IPC server and report startup readiness or bind failure on `ready_sender`.
     ///
     /// This runs in a dedicated thread and handles incoming client connections.
@@ -237,6 +230,13 @@ impl IpcServer {
         {
             self.run_unix_blocking(ready_sender);
         }
+    }
+
+    /// Get the effective pipe/socket path.
+    ///
+    /// Returns the custom path if set, otherwise the default from [`get_ipc_path`].
+    fn effective_pipe_path(&self) -> &Path {
+        self.pipe_path.as_deref().unwrap_or_else(|| get_ipc_path().as_path())
     }
 
     /// Run the IPC server on Windows using named pipes (blocking version).

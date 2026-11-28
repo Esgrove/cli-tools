@@ -139,6 +139,7 @@ fn has_console() -> bool {
     unsafe { !GetConsoleWindow().is_null() }
 }
 
+/// Check if this process has a console attached.
 #[cfg(not(windows))]
 fn has_console() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())

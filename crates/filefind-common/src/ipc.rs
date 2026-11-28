@@ -46,31 +46,6 @@ static IPC_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
     }
 });
 
-/// Current daemon status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DaemonStatus {
-    /// Current state of the daemon.
-    pub state: DaemonStateInfo,
-    /// Number of indexed files.
-    pub indexed_files: u64,
-    /// Number of indexed directories.
-    pub indexed_directories: u64,
-    /// Number of monitored volumes.
-    pub monitored_volumes: u32,
-    /// Uptime in seconds.
-    pub uptime_seconds: u64,
-    /// Whether indexing is currently paused.
-    pub is_paused: bool,
-}
-
-/// IPC client for communicating with the daemon.
-pub struct IpcClient {
-    /// Timeout for operations.
-    timeout: Duration,
-    /// Custom pipe/socket path. When `None`, uses the default path.
-    pipe_path: Option<PathBuf>,
-}
-
 /// Commands that can be sent to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonCommand {
@@ -116,6 +91,31 @@ pub enum DaemonStateInfo {
     Scanning,
     /// Daemon is stopping.
     Stopping,
+}
+
+/// Current daemon status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    /// Current state of the daemon.
+    pub state: DaemonStateInfo,
+    /// Number of indexed files.
+    pub indexed_files: u64,
+    /// Number of indexed directories.
+    pub indexed_directories: u64,
+    /// Number of monitored volumes.
+    pub monitored_volumes: u32,
+    /// Uptime in seconds.
+    pub uptime_seconds: u64,
+    /// Whether indexing is currently paused.
+    pub is_paused: bool,
+}
+
+/// IPC client for communicating with the daemon.
+pub struct IpcClient {
+    /// Timeout for operations.
+    timeout: Duration,
+    /// Custom pipe/socket path. When `None`, uses the default path.
+    pipe_path: Option<PathBuf>,
 }
 
 impl DaemonCommand {
@@ -252,11 +252,6 @@ impl IpcClient {
         self
     }
 
-    /// Get the effective pipe/socket path for this client.
-    fn pipe_path(&self) -> &Path {
-        self.pipe_path.as_deref().unwrap_or(get_ipc_path())
-    }
-
     /// Check if the daemon is running.
     #[must_use]
     pub fn is_daemon_running(&self) -> bool {
@@ -355,6 +350,11 @@ impl IpcClient {
             DaemonResponse::Error(error) => anyhow::bail!("Failed to trigger prune: {error}"),
             other => anyhow::bail!("Unexpected response: {other:?}"),
         }
+    }
+
+    /// Get the effective pipe/socket path for this client.
+    fn pipe_path(&self) -> &Path {
+        self.pipe_path.as_deref().unwrap_or(get_ipc_path())
     }
 
     #[cfg(windows)]

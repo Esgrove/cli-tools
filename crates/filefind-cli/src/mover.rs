@@ -2195,8 +2195,8 @@ mod tests {
 
     #[test]
     fn test_replace_unc_root_with_drive_lowercase_changes_byte_length() {
-        // "Ⱥ" is 2 bytes but lowercases to the 3-byte "ⱥ".
-        // Slicing the path by the root length used to cut inside the second "Ⱥ" and panic.
+        // "Ⱥ" is 2 bytes but lowercases to the 3-byte "ⱥ",
+        // so slicing must follow character boundaries rather than the lowercased root byte length.
         let result = replace_unc_root_with_drive(r"\\nas\ⱥȺ\dir", r"\\NAS\ȺȺ", 'Z');
         assert_eq!(result, Some(PathBuf::from(r"Z:\dir")));
 

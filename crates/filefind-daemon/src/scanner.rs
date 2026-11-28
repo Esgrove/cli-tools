@@ -71,6 +71,7 @@ struct NtfsScanOutput {
     current_usn: Option<i64>,
 }
 
+/// Configured scan paths grouped by the scanning strategy each path requires.
 struct CategorizedPaths {
     ntfs_drive_roots: Vec<char>,
     local_paths_by_drive: HashMap<char, Vec<String>>,

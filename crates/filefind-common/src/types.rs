@@ -7,6 +7,40 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+/// Type of volume/drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VolumeType {
+    /// NTFS formatted drive (supports MFT reading).
+    Ntfs,
+    /// Other local file system (FAT32, exFAT, etc.).
+    Local,
+    /// Network share or mapped network drive.
+    Network,
+    /// Removable drive (USB, etc.).
+    Removable,
+}
+
+/// File change event from the watcher.
+#[derive(Debug, Clone)]
+pub enum FileChangeEvent {
+    /// File or directory was created.
+    Created(PathBuf),
+
+    /// File or directory was modified.
+    Modified(PathBuf),
+
+    /// File or directory was deleted.
+    Deleted(PathBuf),
+
+    /// File or directory was renamed.
+    Renamed {
+        /// Original path before the rename.
+        from: PathBuf,
+        /// New path after the rename.
+        to: PathBuf,
+    },
+}
+
 /// Information about an indexed volume/drive.
 #[derive(Debug, Clone)]
 pub struct IndexedVolume {
@@ -102,40 +136,6 @@ pub struct IndexStats {
 
     /// Last time the index was updated.
     pub last_updated: Option<SystemTime>,
-}
-
-/// Type of volume/drive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum VolumeType {
-    /// NTFS formatted drive (supports MFT reading).
-    Ntfs,
-    /// Other local file system (FAT32, exFAT, etc.).
-    Local,
-    /// Network share or mapped network drive.
-    Network,
-    /// Removable drive (USB, etc.).
-    Removable,
-}
-
-/// File change event from the watcher.
-#[derive(Debug, Clone)]
-pub enum FileChangeEvent {
-    /// File or directory was created.
-    Created(PathBuf),
-
-    /// File or directory was modified.
-    Modified(PathBuf),
-
-    /// File or directory was deleted.
-    Deleted(PathBuf),
-
-    /// File or directory was renamed.
-    Renamed {
-        /// Original path before the rename.
-        from: PathBuf,
-        /// New path after the rename.
-        to: PathBuf,
-    },
 }
 
 impl VolumeType {

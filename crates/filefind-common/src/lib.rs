@@ -153,7 +153,8 @@ pub fn is_mapped_network_drive(path: &Path) -> bool {
         let mut root: Vec<u16> = prefix_str.encode_wide().collect();
         if root.get(1) == Some(&u16::from(b':')) {
             root.push(u16::from(b'\\'));
-            root.push(0); // null terminator
+            // Null terminator for the Windows API string.
+            root.push(0);
 
             // SAFETY: GetDriveTypeW is a safe Windows API call
             // that only reads the null-terminated string to determine drive type

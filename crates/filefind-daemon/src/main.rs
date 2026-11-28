@@ -27,23 +27,6 @@ use windows::Win32::System::Console::FreeConsole;
 use cli_tools_common::{format_number, print_cyan, print_green};
 use filefind_common::{Config, LogLevel, get_log_directory};
 
-/// Background file indexing daemon for filefind
-#[derive(Parser)]
-#[command(about, author, version, name = env!("CARGO_BIN_NAME"))]
-struct DaemonCli {
-    /// Subcommand to execute
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Set the log level
-    #[arg(short = 'l', long = "log", value_enum, global = true)]
-    log_level: Option<LogLevel>,
-
-    /// Print verbose output
-    #[arg(short, long, global = true)]
-    verbose: bool,
-}
-
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Start the daemon and begin indexing
@@ -111,6 +94,23 @@ enum Command {
         #[arg(short = 'I', long)]
         install: bool,
     },
+}
+
+/// Background file indexing daemon for filefind
+#[derive(Parser)]
+#[command(about, author, version, name = env!("CARGO_BIN_NAME"))]
+struct DaemonCli {
+    /// Subcommand to execute
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Set the log level
+    #[arg(short = 'l', long = "log", value_enum, global = true)]
+    log_level: Option<LogLevel>,
+
+    /// Print verbose output
+    #[arg(short, long, global = true)]
+    verbose: bool,
 }
 
 fn main() -> Result<()> {

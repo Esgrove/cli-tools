@@ -179,7 +179,8 @@ impl UsnMonitor {
         let volume_handle = unsafe {
             CreateFileW(
                 PCWSTR(volume_path.as_ptr()),
-                0x8000_0000, // GENERIC_READ
+                // GENERIC_READ
+                0x8000_0000,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
@@ -210,33 +211,6 @@ impl UsnMonitor {
     #[cfg(not(windows))]
     pub fn new(_drive_letter: char, _last_usn: i64) -> Result<Self> {
         bail!("USN Journal monitoring is only supported on Windows");
-    }
-
-    /// Query USN Journal information (static helper).
-    #[cfg(windows)]
-    fn query_usn_journal_static(handle: HANDLE) -> Result<USN_JOURNAL_DATA_V0> {
-        let mut journal_data: USN_JOURNAL_DATA_V0 = unsafe { std::mem::zeroed() };
-        let mut bytes_returned: u32 = 0;
-
-        let success = unsafe {
-            DeviceIoControl(
-                handle,
-                FSCTL_QUERY_USN_JOURNAL,
-                None,
-                0,
-                Some((&raw mut journal_data).cast()),
-                std::mem::size_of::<USN_JOURNAL_DATA_V0>() as u32,
-                Some(&raw mut bytes_returned),
-                None,
-            )
-            .is_ok()
-        };
-
-        if !success {
-            bail!("Failed to query USN Journal. Ensure the journal is enabled and you have admin privileges.");
-        }
-
-        Ok(journal_data)
     }
 
     /// Query current USN Journal information.
@@ -288,7 +262,8 @@ impl UsnMonitor {
         // Prepare read request
         let mut read_data = READ_USN_JOURNAL_DATA_V0 {
             StartUsn: current_usn,
-            ReasonMask: 0xFFFF_FFFF, // All reasons
+            // Subscribe to all USN reasons.
+            ReasonMask: 0xFFFF_FFFF,
             ReturnOnlyOnClose: 0,
             Timeout: 0,
             BytesToWaitFor: 0,
@@ -344,11 +319,6 @@ impl UsnMonitor {
         Ok((changes, current_usn))
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const fn journal_position_invalid(info: &UsnJournalInfo, journal_id: u64, last_usn: i64) -> bool {
-        info.journal_id != journal_id || last_usn != 0 && (last_usn < info.lowest_valid_usn || last_usn > info.next_usn)
-    }
-
     /// Read changes from the USN Journal (non-Windows stub).
     #[expect(
         clippy::unused_self,
@@ -358,6 +328,94 @@ impl UsnMonitor {
     #[cfg(not(windows))]
     pub fn read_changes(&mut self) -> Result<(Vec<UsnChange>, i64)> {
         bail!("USN Journal monitoring is only supported on Windows");
+    }
+
+    /// Start monitoring the USN Journal in the background.
+    ///
+    /// Returns a channel receiver for change events.
+    #[expect(dead_code, reason = "public API for background monitoring")]
+    pub fn start_monitoring(mut self, poll_interval: Duration) -> (mpsc::Receiver<Vec<UsnChange>>, Arc<AtomicBool>) {
+        let (sender, receiver) = mpsc::channel(100);
+        let shutdown = self.shutdown.clone();
+
+        tokio::spawn(async move {
+            info!("Started USN Journal monitoring for {}:", self.drive_letter);
+
+            while !self.shutdown.load(Ordering::Relaxed) {
+                match self.read_changes() {
+                    Ok((changes, _new_usn)) => {
+                        if !changes.is_empty() {
+                            debug!("USN Journal: {} changes detected", changes.len());
+                            if sender.send(changes).await.is_err() {
+                                // Receiver dropped, stop monitoring
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        error!("Error reading USN Journal: {}", error);
+                    }
+                }
+
+                tokio::time::sleep(poll_interval).await;
+            }
+
+            info!("Stopped USN Journal monitoring for {}:", self.drive_letter);
+        });
+
+        (receiver, shutdown)
+    }
+
+    /// Get the current last USN value.
+    #[cfg(test)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[must_use]
+    pub const fn get_last_usn(&self) -> i64 {
+        self.last_usn
+    }
+
+    /// Get the drive letter being monitored.
+    #[must_use]
+    pub const fn get_drive_letter(&self) -> char {
+        self.drive_letter
+    }
+
+    /// Signal the monitor to stop.
+    pub fn stop(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+
+    /// Query USN Journal information (static helper).
+    #[cfg(windows)]
+    fn query_usn_journal_static(handle: HANDLE) -> Result<USN_JOURNAL_DATA_V0> {
+        let mut journal_data: USN_JOURNAL_DATA_V0 = unsafe { std::mem::zeroed() };
+        let mut bytes_returned: u32 = 0;
+
+        let success = unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_QUERY_USN_JOURNAL,
+                None,
+                0,
+                Some((&raw mut journal_data).cast()),
+                std::mem::size_of::<USN_JOURNAL_DATA_V0>() as u32,
+                Some(&raw mut bytes_returned),
+                None,
+            )
+            .is_ok()
+        };
+
+        if !success {
+            bail!("Failed to query USN Journal. Ensure the journal is enabled and you have admin privileges.");
+        }
+
+        Ok(journal_data)
+    }
+
+    /// Return whether the saved journal ID or USN cursor is no longer valid for the current journal.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    const fn journal_position_invalid(info: &UsnJournalInfo, journal_id: u64, last_usn: i64) -> bool {
+        info.journal_id != journal_id || last_usn != 0 && (last_usn < info.lowest_valid_usn || last_usn > info.next_usn)
     }
 
     /// Parse a buffer of USN records returned by `FSCTL_READ_USN_JOURNAL`.
@@ -457,61 +515,6 @@ impl UsnMonitor {
             attributes: file_attributes,
             is_directory,
         })
-    }
-
-    /// Start monitoring the USN Journal in the background.
-    ///
-    /// Returns a channel receiver for change events.
-    #[expect(dead_code, reason = "public API for background monitoring")]
-    pub fn start_monitoring(mut self, poll_interval: Duration) -> (mpsc::Receiver<Vec<UsnChange>>, Arc<AtomicBool>) {
-        let (sender, receiver) = mpsc::channel(100);
-        let shutdown = self.shutdown.clone();
-
-        tokio::spawn(async move {
-            info!("Started USN Journal monitoring for {}:", self.drive_letter);
-
-            while !self.shutdown.load(Ordering::Relaxed) {
-                match self.read_changes() {
-                    Ok((changes, _new_usn)) => {
-                        if !changes.is_empty() {
-                            debug!("USN Journal: {} changes detected", changes.len());
-                            if sender.send(changes).await.is_err() {
-                                // Receiver dropped, stop monitoring
-                                break;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        error!("Error reading USN Journal: {}", error);
-                    }
-                }
-
-                tokio::time::sleep(poll_interval).await;
-            }
-
-            info!("Stopped USN Journal monitoring for {}:", self.drive_letter);
-        });
-
-        (receiver, shutdown)
-    }
-
-    /// Get the current last USN value.
-    #[cfg(test)]
-    #[cfg_attr(not(windows), allow(dead_code))]
-    #[must_use]
-    pub const fn get_last_usn(&self) -> i64 {
-        self.last_usn
-    }
-
-    /// Get the drive letter being monitored.
-    #[must_use]
-    pub const fn get_drive_letter(&self) -> char {
-        self.drive_letter
-    }
-
-    /// Signal the monitor to stop.
-    pub fn stop(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1739,7 +1742,7 @@ mod tests {
 
     #[test]
     fn test_parse_usn_buffer_bytes_returned_greater_than_buffer() {
-        // A bytes_returned larger than the buffer used to slice past the end and panic
+        // A bytes_returned larger than the buffer must be clamped instead of slicing past the end.
         let record = build_aligned_v2_record(100, 5, 1000, reason_flags::USN_REASON_FILE_CREATE, 0x20, "file.txt");
         let buffer = build_usn_journal_buffer(2000, std::slice::from_ref(&record));
 

@@ -1,3 +1,5 @@
+//! Match highlighting, path accessibility checks, and directory size helpers for `filefind`.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -411,15 +413,15 @@ mod tests {
 
     #[test]
     fn test_highlight_match_lowercase_longer_than_original() {
-        // "Ⱥ" is 2 bytes but lowercases to the 3-byte "ⱥ".
-        // Offsets from the lowercased text used to highlight the wrong characters.
+        // "Ⱥ" is 2 bytes but lowercases to the 3-byte "ⱥ",
+        // so match offsets must map back to character boundaries in the original text.
         let result = highlight_match("ȺȺ-report.txt", &["report"]);
         assert_eq!(result, format!("ȺȺ-{}.txt", highlighted("report")));
     }
 
     #[test]
     fn test_highlight_match_lowercase_longer_does_not_panic() {
-        // Offsets from the lowercased text used to run past the end of the original text
+        // Lowercased byte offsets can exceed the original text length when a character expands on lowercasing.
         let result = highlight_match("Ⱥx", &["x"]);
         assert_eq!(result, format!("Ⱥ{}", highlighted("x")));
 
