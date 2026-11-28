@@ -68,7 +68,7 @@ Options:
 | **Start daemon** | Starts the sibling `filefindd` process (`filefindd start`) |
 | **Stop daemon** | Sends a Stop IPC command to the running daemon |
 | **Rescan** | Sends a Rescan IPC command for all indexed roots |
-| **About Filefind** | Shows application metadata |
+| **About Filefind** | Shows the version, git commit and branch, build time, and rustc version |
 | **Quit** | Exits only the tray application and leaves any running daemon intact |
 
 ## Platform notes

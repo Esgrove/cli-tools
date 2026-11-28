@@ -376,20 +376,7 @@ fn create_menu() -> Result<(Menu, MenuItems)> {
     let quit_item = MenuItem::with_id(menu_ids::QUIT, "Quit", true, None);
 
     // About item
-    let about_item = PredefinedMenuItem::about(
-        Some("About Filefind"),
-        Some(AboutMetadata {
-            name: Some("Filefind".to_string()),
-            version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            authors: Some(vec!["Esgrove".to_string()]),
-            comments: Some("Fast file indexing and search".to_string()),
-            copyright: Some("MIT License".to_string()),
-            license: Some("MIT".to_string()),
-            website: Some("https://github.com/Esgrove/cli-tools".to_string()),
-            website_label: Some("GitHub".to_string()),
-            ..Default::default()
-        }),
-    );
+    let about_item = PredefinedMenuItem::about(Some("About Filefind"), Some(about_metadata()));
 
     // Build the menu
     menu.append(&status_item)?;
@@ -604,6 +591,27 @@ fn start_daemon() -> Result<()> {
     Ok(())
 }
 
+/// Application metadata for the About window.
+///
+/// Shows the multi-line build details with the version, git commit and branch, build time, and rustc version.
+/// Windows and GTK show them under the description in `comments`,
+/// and macOS shows them as `credits` since its About panel does not support `comments`.
+fn about_metadata() -> AboutMetadata {
+    let build_details = cli_tools_version::build_details();
+    AboutMetadata {
+        name: Some("Filefind".to_string()),
+        version: Some(cli_tools_version::PACKAGE_VERSION.to_string()),
+        authors: Some(vec!["Esgrove".to_string()]),
+        comments: Some(format!("Fast file indexing and search\n\n{build_details}")),
+        copyright: Some("MIT License".to_string()),
+        license: Some("MIT".to_string()),
+        website: Some("https://github.com/Esgrove/cli-tools".to_string()),
+        website_label: Some("GitHub".to_string()),
+        credits: Some(build_details),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,5 +819,35 @@ mod test_tray_state_and_daemon_lookup {
             resolve_daemon_executable(None),
             PathBuf::from(if cfg!(windows) { "filefindd.exe" } else { "filefindd" })
         );
+    }
+}
+
+#[cfg(test)]
+mod test_about_metadata {
+    use super::*;
+
+    #[test]
+    fn shows_the_package_version() {
+        let metadata = about_metadata();
+        assert_eq!(metadata.version.as_deref(), Some(cli_tools_version::PACKAGE_VERSION));
+        assert_eq!(metadata.short_version, None);
+    }
+
+    #[test]
+    fn comments_and_credits_show_the_build_details() {
+        let metadata = about_metadata();
+        let comments = metadata.comments.unwrap();
+        let credits = metadata.credits.unwrap();
+        assert!(comments.starts_with("Fast file indexing and search\n\n"));
+        for value in [
+            cli_tools_version::GIT_COMMIT,
+            cli_tools_version::GIT_BRANCH,
+            cli_tools_version::RUST_VERSION,
+        ] {
+            assert!(comments.contains(value), "{value} missing from comments:\n{comments}");
+            assert!(credits.contains(value), "{value} missing from credits:\n{credits}");
+        }
+        assert!(credits.contains("Built:"));
+        assert!(credits.contains(" UTC"));
     }
 }
