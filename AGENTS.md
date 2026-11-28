@@ -67,6 +67,14 @@ cargo run --bin xtask -- list install
 # Build every binary in one release build and install it with the xtask install group
 ./install.sh
 
+# Bump the workspace patch version, or minor with -n and major with -m, and update the lock files.
+# Add -c to commit the Cargo.toml and Cargo.lock changes. Needs cargo-edit.
+cargo run --bin xtask -- bump -c
+
+# Upgrade every dependency including incompatible versions, update the lock files, and run the checks and tests.
+# With -c the Cargo.toml and Cargo.lock changes are committed once everything passes.
+cargo run --bin xtask -- update -c
+
 # Run the property tests with more generated cases
 PROPTEST_CASES=20000 cargo test --workspace property
 
@@ -111,6 +119,7 @@ Install these tools for testing:
 ```shell
 cargo install cargo-nextest
 cargo install cargo-llvm-cov
+cargo install cargo-edit
 ```
 
 ## Benchmarks

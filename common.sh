@@ -76,6 +76,18 @@ get_rust_executable_names() {
     }' "$REPO_ROOT"/crates/*/Cargo.toml
 }
 
+# Print the version in the [workspace.package] table of the root manifest.
+workspace_version() {
+    awk '
+        /^\[/ { in_package = ($0 == "[workspace.package]") }
+        in_package && /^version[[:space:]]*=/ {
+            gsub(/^[^"]*"|".*$/, "")
+            print
+            exit
+        }
+    ' "$REPO_ROOT/Cargo.toml"
+}
+
 # if DRYRUN or DRY_RUN has been set, only print commands instead of running them
 run_command() {
     if [ "$DRY_RUN" = true ] || [ "$DRYRUN" = true ]; then

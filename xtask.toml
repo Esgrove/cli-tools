@@ -1,5 +1,6 @@
 # Tasks of this repository for the xtask runner in crates/xtask, see crates/xtask/README.md.
 # Plain `xtask` runs the test group, and `xtask install` builds and installs every binary.
+# `xtask bump` bumps the workspace version and `xtask update` upgrades the dependencies, both committing with -c.
 
 [settings]
 default_group = "test"
@@ -9,8 +10,24 @@ short = "l"
 help = "Skip clippy"
 
 [flags.no-fuzz]
-short = "n"
+short = "z"
 help = "Skip fuzzing"
+
+[flags.major]
+short = "m"
+help = "Bump the major version in the bump group"
+
+[flags.minor]
+short = "n"
+help = "Bump the minor version in the bump group"
+
+[flags.patch]
+short = "p"
+help = "Bump the patch version in the bump group, the default"
+
+[flags.commit]
+short = "c"
+help = "Commit the Cargo.toml and Cargo.lock changes of the bump and update groups once every step passes"
 
 [groups.test]
 help = "Check formatting, run clippy, all workspace tests, and every fuzz target"
@@ -20,9 +37,30 @@ tasks = ["cargo-fmt", "cargo-clippy", "cargo-nextest", "doc-tests", "fuzz"]
 help = "Build every binary in one release build and copy them to the Cargo bin directory"
 tasks = ["cargo-build-release", "copy-binaries", "shell-completions"]
 
+[groups.bump]
+help = "Bump the workspace version, patch by default, and update the lock files"
+tasks = ["cargo-files-clean", "bump-version", "commit-version"]
+fail_fast = true
+
+# The checks run after the dependency updates, and fail fast keeps the commit from starting after a failure.
+[groups.update]
+help = "Upgrade the dependencies including incompatible versions, update the lock files, and run the checks and tests"
+tasks = [
+    "cargo-files-clean",
+    "cargo-upgrade",
+    "cargo-update",
+    "cargo-fmt",
+    "cargo-clippy",
+    "cargo-nextest",
+    "doc-tests",
+    "commit-dependencies",
+]
+fail_fast = true
+
 [tasks.cargo-fmt]
 label = "Rust formatting"
 priority = 1
+after = ["cargo-update"]
 command = ["cargo", "fmt", "--all", "--check"]
 
 # The cargo tasks share the workspace target directory, where cargo would make them wait on its build lock anyway.
@@ -30,12 +68,14 @@ command = ["cargo", "fmt", "--all", "--check"]
 label = "Clippy"
 when = "!no-lint"
 priority = 2
+after = ["cargo-update"]
 locks = ["cargo-target"]
 command = ["cargo", "clippy", "--workspace", "--all-targets", "--", "-Dwarnings"]
 
 [tasks.cargo-nextest]
 label = "Unit, integration, CLI, and property tests"
 priority = 3
+after = ["cargo-update"]
 locks = ["cargo-target"]
 require_commands = [
     "cargo",
@@ -46,6 +86,7 @@ command = ["cargo", "nextest", "run", "--workspace"]
 [tasks.doc-tests]
 label = "Doc tests"
 priority = 4
+after = ["cargo-update"]
 locks = ["cargo-target"]
 command = ["cargo", "test", "--workspace", "--doc"]
 
@@ -73,3 +114,49 @@ command = ["bash", "copy-binaries.sh"]
 label = "Shell completions"
 deps = ["copy-binaries"]
 command = ["bash", "completions.sh", "--silent"]
+
+# Changing manifests with uncommitted changes would put those changes in the commit.
+[tasks.cargo-files-clean]
+label = "No uncommitted Cargo.toml or Cargo.lock changes"
+when = "commit"
+priority = 1
+command = ["bash", "commit-cargo-files.sh", "--check"]
+
+[tasks.bump-version]
+label = "Bump the workspace version and update the lock files"
+after = ["cargo-files-clean"]
+locks = ["cargo-target"]
+require_commands = ["cargo", { name = "cargo-set-version", hint = "Install it with: cargo install --locked cargo-edit" }]
+command = ["bash", "bump-version.sh"]
+
+[tasks.commit-version]
+label = "Commit the version bump"
+when = "commit"
+deps = ["bump-version"]
+command = ["bash", "commit-cargo-files.sh", "build: bump version to {version}"]
+
+[tasks.cargo-upgrade]
+label = "Upgrade dependencies including incompatible versions"
+after = ["cargo-files-clean"]
+locks = ["cargo-target"]
+require_commands = ["cargo", { name = "cargo-upgrade", hint = "Install it with: cargo install --locked cargo-edit" }]
+commands = [
+    { argv = ["cargo", "upgrade", "--incompatible"] },
+    { argv = ["cargo", "upgrade", "--incompatible", "--manifest-path", "fuzz/Cargo.toml"] },
+]
+
+[tasks.cargo-update]
+label = "Update the lock files"
+deps = ["cargo-upgrade"]
+locks = ["cargo-target"]
+commands = [
+    { argv = ["cargo", "update"] },
+    { argv = ["cargo", "update", "--manifest-path", "fuzz/Cargo.toml"] },
+]
+
+[tasks.commit-dependencies]
+label = "Commit the dependency updates"
+when = "commit"
+deps = ["cargo-update"]
+after = ["cargo-fmt", "cargo-clippy", "cargo-nextest", "doc-tests"]
+command = ["bash", "commit-cargo-files.sh", "cargo update"]

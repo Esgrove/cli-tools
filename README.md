@@ -14,6 +14,16 @@ Shared helpers live in the [`cli-tools-common`](./crates/common), [`cli-tools-db
 and `test` task groups of [`xtask.toml`](./xtask.toml) with the [`xtask`](#xtask) runner from this repository,
 so independent steps run in parallel.
 
+The `bump` and `update` groups maintain the workspace and need [cargo-edit](https://github.com/killercup/cargo-edit).
+`-c, --commit` commits their Cargo.toml and Cargo.lock changes once every step passes.
+
+```shell
+# Bump the patch version, or the minor version with -n and the major version with -m, and update the lock files
+cargo run --bin xtask -- bump -c
+# Upgrade all dependencies including incompatible versions, update the lock files, then check, lint, and test
+cargo run --bin xtask -- update -c
+```
+
 Install a single tool straight from GitHub by its package name:
 
 ```shell
@@ -971,6 +981,7 @@ Options:
 ```shell
 cargo install --locked cargo-nextest
 cargo install --locked cargo-llvm-cov
+cargo install --locked cargo-edit
 ```
 
 ### Testing
